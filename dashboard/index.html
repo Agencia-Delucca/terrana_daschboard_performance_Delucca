@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Terrana B2B — Dashboard de Performance</title>
+  <title>Terrana B2B — Performance · Agência Delucca</title>
   <link rel="stylesheet" href="assets/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
 
-  <!-- carregando / erro fatal -->
+  <!-- carregando / erro -->
   <div id="loading">
     <div>
       <div class="spin"></div>
@@ -17,27 +17,18 @@
     </div>
   </div>
 
-  <!-- login (produção — Supabase) -->
-  <div id="login-screen" hidden>
-    <div class="login-box">
-      <div class="brand-mark">T</div>
-      <h2>Terrana B2B</h2>
-      <div class="sub">Dashboard de Performance — Agência Delucca</div>
-      <form id="login-form">
-        <input type="email" id="login-email" placeholder="E-mail" autocomplete="username" required>
-        <input type="password" id="login-pass" placeholder="Senha" autocomplete="current-password" required>
-        <button type="submit" id="login-btn">Entrar</button>
-      </form>
-      <div class="login-err" id="login-err"></div>
-      <div class="login-notice" id="login-notice" hidden></div>
-    </div>
-  </div>
-
   <!-- sidebar -->
   <aside id="sidebar">
     <div class="brand">
-      <div class="brand-mark">T</div>
-      <div class="name">Terrana B2B<small>Performance</small></div>
+      <div class="brand-row">
+        <div class="brand-mark">T</div>
+        <div class="brand-name">Terrana</div>
+      </div>
+      <div class="brand-perf">PERFORMANCE</div>
+    </div>
+    <div class="front-badge">
+      <div class="front-name">B2B — Parcerias</div>
+      <div class="front-sub">frente única</div>
     </div>
     <nav id="nav"></nav>
     <div class="sidebar-foot"><strong>Agência Delucca</strong><br>dashboard de performance</div>
@@ -46,22 +37,24 @@
   <!-- conteúdo -->
   <div id="main">
     <header id="topbar">
-      <div class="who">
-        <h1>Terrana B2B</h1>
-        <span id="stamp"></span>
-      </div>
+      <h1 id="page-title">Terrana B2B</h1>
       <div id="period-filter">
-        <div class="presets" id="presets"></div>
-        <label>De <input type="date" id="f-start"></label>
-        <label>Até <input type="date" id="f-end"></label>
+        <label>De <input type="date" id="f-start" placeholder="dd/mm/aaaa"></label>
+        <label>Até <input type="date" id="f-end" placeholder="dd/mm/aaaa"></label>
+        <select id="f-preset">
+          <option value="all">Todo período</option>
+          <option value="7">Últimos 7 dias</option>
+          <option value="30">Últimos 30 dias</option>
+          <option value="90">Últimos 90 dias</option>
+          <option value="custom" hidden>Personalizado</option>
+        </select>
       </div>
     </header>
     <main id="content"></main>
-    <footer id="footer"><strong>Agência Delucca</strong> — dashboard de performance · Terrana B2B</footer>
+    <footer id="footer"><strong>Agência Delucca</strong> — dashboard de performance · Terrana B2B · <span id="stamp"></span></footer>
   </div>
 
-  <!-- Dados locais embutidos (dev): permite abrir com duplo clique. Em
-       produção o arquivo não existe e o erro de carga é ignorado. -->
+  <!-- Dados embutidos (permite abrir com duplo clique); fallback: fetch de data/summary.json -->
   <script src="data/summary.js"></script>
   <script src="assets/app.js"></script>
 </body>

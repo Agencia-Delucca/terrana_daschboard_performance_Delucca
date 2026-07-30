@@ -520,6 +520,147 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
     }
 
 
+def tipo_campanha(nome):
+    """Classifica a campanha Meta pelo NOME (mesmo padrão do projeto-base):
+    captação (formulário de leads), impulsionamento (alcance/tráfego/posts)
+    ou ecommerce (venda). O que não casar vira 'outras' com aviso."""
+    n = (nome or "").lower()
+    if "formulário" in n or "formulario" in n or "leads" in n:
+        return "captacao"
+    if n.startswith("impulsionamento") or "instagram post" in n:
+        return "impulsionamento"
+    if "ecommerce" in n or "[venda]" in n or "[compra]" in n:
+        return "ecommerce"
+    print(f"::warning::Campanha sem tipo identificável no nome: '{nome}' — "
+          "classificada como 'outras'.")
+    return "outras"
+
+
+def aggregate_institucional(meta_rows, campaign_status):
+    """Página Institucional & Impulsionamento: só campanhas de boost.
+
+    Alcance fica de fora de propósito: reach não é aditivo — somar
+    anúncio×dia inflaria o número (regra 9: não inventar dado).
+    """
+    monthly = defaultdict(lambda: defaultdict(float))
+    campanhas = defaultdict(lambda: defaultdict(float))
+    split = defaultdict(float)
+
+    for r in meta_rows:
+        tipo = tipo_campanha(r["campanha"])
+        split[tipo] += r["gasto"]
+        if tipo != "impulsionamento":
+            continue
+        m = r["data"][:7]
+        for bucket, key in ((monthly, m), (campanhas, r["campanha"])):
+            b = bucket[key]
+            b["gasto"] += r["gasto"]
+            b["impressoes"] += r["impressoes"]
+            b["cliques"] += r["cliques"]
+            b["engajamento"] += r.get("engajamento", 0)
+            b["video_views"] += r.get("video_views", 0)
+            b["seguidores"] += r.get("seguidores", 0)
+            b["conversas"] += r["conversas"]
+
+    def fecha(v):
+        return {kk: rnd(vv) if kk == "gasto" else int(vv) for kk, vv in v.items()}
+
+    return {
+        "split_gasto": {k: rnd(v) for k, v in sorted(split.items())},
+        "monthly": [{"mes": k, **fecha(v)} for k, v in sorted(monthly.items())],
+        "campaigns": sorted(
+            [{"campanha": k, **fecha(v),
+              "status": campaign_status.get(k, "")}
+             for k, v in campanhas.items()],
+            key=lambda x: -x["gasto"]),
+    }
+
+
+def aggregate_publico(breakdowns):
+    """Página Público — repassa os breakdowns mensais com números fechados."""
+    if not breakdowns:
+        return {"disponivel": False}
+
+    def fecha(rows):
+        return [{**r, "gasto": rnd(r.get("gasto", 0))} for r in rows]
+
+    return {
+        "disponivel": any(breakdowns.get(k) for k in
+                          ("age_gender", "placement", "region")),
+        "age_gender": fecha(breakdowns.get("age_gender", [])),
+        "placement": fecha(breakdowns.get("placement", [])),
+        "region": fecha(breakdowns.get("region", [])),
+    }
+
+
+def qualidade_por_responsavel(leads, statuses, events):
+    """Tabela 'Qualidade de atendimento por responsável' (referência Dr. Move).
+
+    - sem_1o_atend: % dos leads do responsável ainda na etapa de entrada;
+    - tempo_1o_atend_dias: mediana entre a criação e a 1ª troca de etapa
+      (eventos lead_status_changed, janela de 180 dias);
+    - parado_dias: mediana, nos leads vivos, do tempo desde a última troca.
+    """
+    abertas = [s for s in statuses
+               if s["id"] not in (config.KOMMO_STATUS_GANHO,
+                                  config.KOMMO_STATUS_PERDIDO)]
+    entrada_id = min(abertas, key=lambda s: s.get("sort", 0))["id"] \
+        if abertas else None
+
+    primeira_troca = {}
+    ultima_troca = {}
+    for ev in events:
+        if ev["type"] != "lead_status_changed" or not ev.get("entity_id"):
+            continue
+        lid = ev["entity_id"]
+        ts = ev.get("created_at") or 0
+        if lid not in primeira_troca:
+            primeira_troca[lid] = ts
+        ultima_troca[lid] = max(ultima_troca.get(lid, 0), ts)
+
+    agora = datetime.now(BRT).timestamp()
+    por_resp = defaultdict(lambda: {"leads": 0, "vendas": 0, "perdidos": 0,
+                                    "sem_atend": 0, "t1": [], "parado": []})
+    for lead in leads:
+        r = por_resp[lead.get("responsavel") or "sem responsável"]
+        r["leads"] += 1
+        if lead.get("ganho"):
+            r["vendas"] += 1
+        elif lead.get("perdido"):
+            r["perdidos"] += 1
+        else:
+            criado_ts = datetime.fromisoformat(lead["criado_em"]).timestamp() \
+                if lead.get("criado_em") else None
+            ref = ultima_troca.get(lead["id"]) or criado_ts
+            if ref:
+                r["parado"].append((agora - ref) / 86400)
+        if entrada_id is not None and lead.get("etapa_id") == entrada_id:
+            r["sem_atend"] += 1
+        t = primeira_troca.get(lead["id"])
+        if t and lead.get("criado_em"):
+            criado_ts = datetime.fromisoformat(lead["criado_em"]).timestamp()
+            if t >= criado_ts:
+                r["t1"].append((t - criado_ts) / 86400)
+
+    def mediana(vals):
+        if not vals:
+            return None
+        vals = sorted(vals)
+        return rnd(vals[len(vals) // 2], 1)
+
+    return sorted([{
+        "responsavel": nome,
+        "leads": v["leads"],
+        "vendas": v["vendas"],
+        "perdidos": v["perdidos"],
+        "taxa_conv": rnd(v["vendas"] / v["leads"] * 100, 1) if v["leads"] else 0,
+        "sem_1o_atend_pct": rnd(v["sem_atend"] / v["leads"] * 100, 1)
+        if v["leads"] else 0,
+        "tempo_1o_atend_dias": mediana(v["t1"]),
+        "parado_dias": mediana(v["parado"]),
+    } for nome, v in por_resp.items()], key=lambda x: -x["leads"])
+
+
 def aggregate_utm(leads):
     total = len(leads)
     com_utm = sum(1 for lead in leads
@@ -651,6 +792,7 @@ def main():
     events = ler("kommo_events")
     meta_rows = ler("meta_ads")
     meta_status = ler("meta_status") or {}
+    meta_breakdowns = ler("meta_breakdowns") or {}
     google_rows = ler("google_ads")
 
     if not leads:
@@ -695,6 +837,11 @@ def main():
         "meta_ads": meta,
         "google_ads": google,
         "utm": utm,
+        "institucional": aggregate_institucional(meta_rows, meta_status)
+        if meta_rows else None,
+        "publico": aggregate_publico(meta_breakdowns),
+        "qualidade_responsavel": qualidade_por_responsavel(
+            leads, statuses, events),
     }
     summary["relatorio"] = build_relatorio(
         leads_agg, crm, meta or {"monthly": []}, atendimento, utm)

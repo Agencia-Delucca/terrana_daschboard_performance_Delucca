@@ -35,6 +35,7 @@ TRACKING_FIELDS = {
 
 CHAT_EVENTS = ["incoming_chat_message", "outgoing_chat_message"]
 TALK_EVENTS = ["talk_created", "talk_closed", "talk_missed_event"]
+FUNNEL_EVENTS = ["lead_added", "lead_status_changed"]
 
 
 class KommoError(RuntimeError):
@@ -215,25 +216,41 @@ def get_talks(client):
 
 
 def get_events(client, days=None):
-    """Eventos de chat e de conversa dos últimos N dias (atendimento)."""
+    """Eventos de chat, conversa e funil dos últimos N dias.
+
+    Os de chat/conversa alimentam o Atendimento; os de funil
+    (lead_status_changed) dão o tempo até o 1º atendimento e o tempo
+    parado por etapa — cada um traz lead (entity_id) e etapas antes/depois.
+    """
     days = days or config.KOMMO_EVENT_DAYS
     since = int(time.time()) - days * 86400
     rows = []
-    for group in (CHAT_EVENTS, TALK_EVENTS):
+    for group in (CHAT_EVENTS, TALK_EVENTS, FUNNEL_EVENTS):
         params = {"filter[type][]": group, "filter[created_at][from]": since}
         for ev in client.paginate("events", params, collection="events"):
             talk_id = None
+            status_before = status_after = None
             for entry in ev.get("value_after") or []:
                 msg = entry.get("message")
                 if msg:
                     talk_id = msg.get("talk_id")
+                status = entry.get("lead_status")
+                if status:
+                    status_after = status.get("id")
+            for entry in ev.get("value_before") or []:
+                status = entry.get("lead_status")
+                if status:
+                    status_before = status.get("id")
             rows.append({
                 "id": ev["id"],
                 "type": ev.get("type", ""),
+                "entity_id": ev.get("entity_id"),
                 "talk_id": talk_id,
+                "status_before": status_before,
+                "status_after": status_after,
                 "created_at": ev.get("created_at"),
                 "criado_em": _iso(ev.get("created_at")),
             })
     rows.sort(key=lambda r: r["created_at"] or 0)
-    print(f"  Kommo: {len(rows)} eventos de atendimento ({days} dias)")
+    print(f"  Kommo: {len(rows)} eventos ({days} dias)")
     return rows

@@ -157,6 +157,9 @@ def get_ad_insights_daily(since=None):
                     "conversas": _actions_value(
                         r.get("actions"),
                         "onsite_conversion.messaging_conversation_started_7d"),
+                    "engajamento": _actions_value(r.get("actions"), "post_engagement"),
+                    "video_views": _actions_value(r.get("actions"), "video_view"),
+                    "seguidores": _actions_value(r.get("actions"), "like"),
                     "thumbnail": cre.get("thumbnail", ""),
                     "permalink": cre.get("permalink", ""),
                 })
@@ -165,3 +168,55 @@ def get_ad_insights_daily(since=None):
     if not rows:
         print("::error::Meta insights vazio — verificar token/conta")
     return rows
+
+
+def get_insights_breakdowns(since=None):
+    """Breakdowns MENSAIS por campanha (a granularidade mensal mantém o JSON
+    pequeno): age_gender (quem responde), placement (onde) e region (de onde).
+    Alimentam a página Público. Falha vira aviso, não erro — a página degrada.
+    """
+    since = since or config.META_SINCE
+    until = dt.date.today().isoformat()
+    base = {
+        "level": "campaign",
+        "time_increment": "monthly",
+        "fields": "campaign_name,spend,impressions,clicks,actions",
+        "time_range": f'{{"since":"{since}","until":"{until}"}}',
+        "limit": 500,
+        "access_token": config.META_ACCESS_TOKEN,
+    }
+    out = {}
+    for key, breakdowns in (("age_gender", "age,gender"),
+                            ("placement", "publisher_platform,platform_position"),
+                            ("region", "region")):
+        try:
+            rows = _paginated(f"{_graph()}/{_acct()}/insights",
+                              {**base, "breakdowns": breakdowns})
+            parsed = []
+            for r in rows:
+                item = {
+                    "mes": (r.get("date_start") or "")[:7],
+                    "campanha": r.get("campaign_name", ""),
+                    "gasto": float(r.get("spend", 0) or 0),
+                    "impressoes": int(r.get("impressions", 0) or 0),
+                    "cliques": int(r.get("clicks", 0) or 0),
+                    "conversas": _actions_value(
+                        r.get("actions"),
+                        "onsite_conversion.messaging_conversation_started_7d"),
+                    "leads_plat": _actions_value(r.get("actions"), "lead"),
+                }
+                if key == "age_gender":
+                    item["idade"] = r.get("age", "?")
+                    item["genero"] = r.get("gender", "?")
+                elif key == "placement":
+                    item["plataforma"] = r.get("publisher_platform", "?")
+                    item["posicao"] = r.get("platform_position", "?")
+                else:
+                    item["regiao"] = r.get("region", "?")
+                parsed.append(item)
+            out[key] = parsed
+            print(f"  Meta breakdown {key}: {len(parsed)} linhas")
+        except Exception as e:
+            print(f"::warning::Meta breakdown {key} falhou (segue sem): {e}")
+            out[key] = []
+    return out

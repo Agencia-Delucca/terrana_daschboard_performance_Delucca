@@ -1,44 +1,37 @@
 /* ============================================================
    Terrana B2B — Dashboard de Performance (Agência Delucca)
-   SPA estática, sem build. Dados: data/summary.json (dev) ou
-   Supabase Storage (produção, após login).
+   SPA estática no padrão visual da agência (SPEC_VISUAL_REFERENCIA.md).
+   Dados: window.__SUMMARY__ (data/summary.js) → fetch data/summary.json.
+   Sem login, sem Supabase — autenticação entra numa fase futura.
    ============================================================ */
 'use strict';
 
-/* ---------- Configuração Supabase (produção) ----------
-   Preencher quando o projeto Supabase da Terrana for criado.
-   Vazio = a tela de login avisa "produção ainda não configurada". */
-const SUPABASE_URL = '';
-const SUPABASE_ANON_KEY = '';
-const SUPABASE_BUCKET = 'dashboard-data';
-const SUPABASE_FILE = 'summary.json';
-
 /* ---------- Estado global ---------- */
-let DATA = null;                 // summary.json inteiro
-const CHARTS = {};               // registry de instâncias Chart.js (anti-leak)
-const FILTER = { start: null, end: null, preset: '30' };
+let DATA = null;                       // summary.json inteiro
+const CHARTS = {};                     // registry Chart.js (anti-leak)
+const FILTER = { start: null, end: null, preset: 'all' };
 let DATA_MIN = null, DATA_MAX = null;
-let LOSS_AXIS = 'criado';        // eixo do gráfico de perdas: 'criado' | 'data'
-let sbClient = null;             // cliente supabase (produção)
 
-/* ---------- Cores (paleta validada p/ fundo #161b22) ---------- */
-const C = {
-  green: '#34a06b',
-  greenStrong: '#4cc287',
-  greenSoft: 'rgba(52,160,107,.22)',
-  blue: '#3f8ee8',
-  blueSoft: 'rgba(63,142,232,.20)',
-  amber: '#d9a13f',
-  amberSoft: 'rgba(217,161,63,.25)',
-  red: '#e0655f',
-  redSoft: 'rgba(224,101,95,.25)',
-  grid: '#232a33',
-  muted: '#8b949e',
-  text: '#e6e8eb'
+/* ---------- Paleta (tokens da spec) ---------- */
+const P = {
+  bgCard: '#0D1524',
+  border: '#1B2942',
+  track: '#131D30',
+  blue: '#2874FC',
+  teal: '#31CDCF',
+  green: '#10B981',
+  red: '#EF4444',
+  amber: '#F59E0B',
+  muted: '#6D7C96',
+  soft: '#CBD5E1',
+  text: '#F4F7FD',
+  blueLight: '#93C5FD',
+  grid: 'rgba(255,255,255,.05)',
+  redShades: ['#EF4444', '#B91C1C', '#F87171', '#7F1D1D', '#FCA5A5', '#DC2626']
 };
 
 /* ============================================================
-   Utilitários de formatação (pt-BR em tudo)
+   Formatação (100% pt-BR)
    ============================================================ */
 const fmt = {
   num: v => Math.round(v || 0).toLocaleString('pt-BR'),
@@ -47,6 +40,7 @@ const fmt = {
   pct: (v, d = 1) => v == null ? '—' : fmt.dec(v, d) + '%',
   date: iso => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) : '—',
   dateFull: iso => iso ? iso.split('-').reverse().join('/') : '—',
+  days: v => v == null ? '—' : fmt.dec(v, 1) + 'd',
   mins: m => {
     if (m == null) return '—';
     if (m < 60) return fmt.dec(m, 0) + ' min';
@@ -54,15 +48,12 @@ const fmt = {
     return fmt.dec(m / 1440, 1) + ' d';
   }
 };
-
-const MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
-function mesNome(m) {            // '2026-07' -> 'Julho de 2026'
+const MESES3 = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+function mesLabel(m) {                 // '2026-07' -> 'Jul/26'
   if (!m) return '—';
-  const [y, mo] = m.split('-');
-  return MESES[parseInt(mo, 10) - 1] + ' de ' + y;
+  const p = m.split('-');
+  return MESES3[parseInt(p[1], 10) - 1] + '/' + p[0].slice(2);
 }
-
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -75,7 +66,9 @@ function esc(s) {
 function inPeriod(d) { return !!d && d >= FILTER.start && d <= FILTER.end; }
 function fdays(list, key = 'dia') { return (list || []).filter(r => inPeriod(r[key])); }
 function sum(list, k) { return (list || []).reduce((a, r) => a + (r[k] || 0), 0); }
-
+function monthInPeriod(m) {
+  return !!m && m >= (FILTER.start || '').slice(0, 7) && m <= (FILTER.end || '').slice(0, 7);
+}
 function addDays(iso, n) {
   const d = new Date(iso + 'T12:00:00');
   d.setDate(d.getDate() + n);
@@ -83,13 +76,11 @@ function addDays(iso, n) {
 }
 function dayRange(a, b) {
   const out = [];
-  let d = a;
-  let guard = 0;
+  let d = a, guard = 0;
   while (d <= b && guard++ < 4000) { out.push(d); d = addDays(d, 1); }
   return out;
 }
-/* Série diária zero-preenchida DENTRO da janela coberta pelos dados
-   (fora da cobertura = null → buraco no gráfico, não zero falso). */
+/* Série diária zero-preenchida dentro da janela coberta pelos dados */
 function dailySeries(rows, fields, key = 'dia') {
   const rowsP = fdays(rows, key);
   if (!rowsP.length) return null;
@@ -112,73 +103,204 @@ function quantile(sortedAsc, q) {
   const lo = Math.floor(pos), hi = Math.ceil(pos);
   return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (pos - lo);
 }
+/* Classificação de campanha Meta pelo nome — espelho de tipo_campanha()
+   do ETL (scripts/generate_dashboard_data.py). */
+function tipoCampanha(nome) {
+  const n = (nome || '').toLowerCase();
+  if (n.indexOf('formulário') >= 0 || n.indexOf('formulario') >= 0 || n.indexOf('leads') >= 0) return 'captacao';
+  if (n.indexOf('impulsionamento') === 0 || n.indexOf('instagram post') >= 0) return 'impulsionamento';
+  if (n.indexOf('ecommerce') >= 0 || n.indexOf('[venda]') >= 0 || n.indexOf('[compra]') >= 0) return 'ecommerce';
+  return 'outras';
+}
+function aggBy(rows, keyFn, fields) {
+  const m = {};
+  (rows || []).forEach(r => {
+    const k = keyFn(r);
+    if (!m[k]) { m[k] = { __row: r }; fields.forEach(f => { m[k][f] = 0; }); }
+    fields.forEach(f => { m[k][f] += r[f] || 0; });
+  });
+  return m;
+}
 
 /* ============================================================
    Builders de UI
    ============================================================ */
-function kpi(label, value, sub, cls) {
-  return '<div class="kpi ' + (cls || '') + '"><div class="kpi-label">' + label +
-    '</div><div class="kpi-value">' + value + '</div>' +
+function kpi(label, value, sub, opts) {
+  opts = opts || {};
+  const v = (value == null)
+    ? '<div class="kpi-dash" title="sem dado"></div>'
+    : '<div class="kpi-value' + (opts.teal ? ' teal' : '') + '">' + value + '</div>';
+  return '<div class="kpi"><div class="kpi-label">' + label + '</div>' + v +
     (sub ? '<div class="kpi-sub">' + sub + '</div>' : '') + '</div>';
 }
-function card(title, body, tagHtml) {
+function card(title, sub, body) {
   return '<div class="card">' +
-    (title ? '<div class="card-head"><h3>' + title + '</h3>' + (tagHtml || '') + '</div>' : '') +
+    (title ? '<div class="card-head"><h3>' + title + '</h3>' +
+      (sub ? '<div class="card-sub">' + sub + '</div>' : '') + '</div>' : '') +
     body + '</div>';
 }
-function chartCard(title, canvasId, tagHtml, extraNote, boxCls) {
-  return card(title,
+function chartCard(title, sub, canvasId, boxCls, note) {
+  return card(title, sub,
     '<div class="chart-box ' + (boxCls || '') + '"><canvas id="' + canvasId + '"></canvas></div>' +
-    (extraNote ? '<div class="note">' + extraNote + '</div>' : ''),
-    tagHtml);
+    (note ? '<div class="note">' + note + '</div>' : ''));
 }
-function emptyBox(msg) {
-  return '<div class="empty">' + (msg || 'Sem dados no período selecionado') + '</div>';
+function banner(kind, html) {
+  return '<div class="banner ' + kind + '">' +
+    (kind === 'amber' ? '<span class="b-ic">⚠</span>' : '') +
+    '<div>' + html + '</div></div>';
 }
-const TAG_SNAPSHOT = '<span class="tag snapshot">foto atual — não filtra por período</span>';
-const TAG_SNAP180 = '<span class="tag snapshot">foto 180 dias — não filtra por período</span>';
-const TAG_TRUTH = '<span class="tag truth">CRM — fonte de verdade</span>';
-const TAG_REF = '<span class="tag ref">plataforma — referência</span>';
+/* Os 2 primeiros alertas do ETL são os banners âmbar padrão de todas as
+   páginas; a Visão Geral mostra a lista completa. */
+function qualityBanners(all) {
+  const alertas = (DATA.relatorio && DATA.relatorio.alertas) || [];
+  const list = all ? alertas : alertas.slice(0, 2);
+  if (!list.length) return '';
+  return '<div class="banners">' + list.map(a => banner('amber', esc(a.texto))).join('') + '</div>';
+}
+function emptyDashed(l1, l2) {
+  return '<div class="empty-dashed"><div class="l1">' + l1 + '</div>' +
+    (l2 ? '<div class="l2">' + l2 + '</div>' : '') + '</div>';
+}
+function tableWrap(headCells, rowsHtml) {
+  return '<div class="table-wrap"><table><thead><tr>' +
+    headCells.map(h => '<th' + (h.r ? ' class="r"' : '') + '>' + h.t + '</th>').join('') +
+    '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+}
+function statusBadge(st) {
+  if (st === 'ACTIVE') return '<span class="badge green">Ativo</span>';
+  if (st === 'PAUSED') return '<span class="badge red">Pausado</span>';
+  if (st) return '<span class="badge gray">' + esc(st) + '</span>';
+  return '<span class="muted" title="status indisponível na API — não inferimos">—</span>';
+}
+function qualityBadge(custoLead, leads) {
+  const target = (DATA.config && DATA.config.cpl_target_meta) || 0;
+  if (!target || custoLead == null || (leads || 0) < 3) {
+    return '<span class="badge gray" title="meta de custo/lead não definida ou base pequena">Dados insuf.</span>';
+  }
+  if (custoLead <= target) return '<span class="badge green">Bom</span>';
+  return '<span class="badge red">Ruim</span>';
+}
+function periodLabel() {
+  return fmt.dateFull(FILTER.start) + ' a ' + fmt.dateFull(FILTER.end);
+}
+
+/* ---------- Funil (componente da spec) ---------- */
+function stageKinds() {
+  const kinds = {};
+  ((DATA.crm || {}).deals_minimal || []).forEach(d => {
+    if (d.ganho) kinds[d.etapa] = 'won';
+    else if (d.perdido) kinds[d.etapa] = 'lost';
+  });
+  return kinds;
+}
+function funnelPeriodStages() {
+  const kinds = stageKinds();
+  const order = ((DATA.crm || {}).funnel || []).slice().sort((a, b) => a.sort - b.sort);
+  const deals = ((DATA.crm || {}).deals_minimal || []).filter(d => inPeriod(d.criado_em));
+  const cnt = {};
+  deals.forEach(d => { cnt[d.etapa] = (cnt[d.etapa] || 0) + 1; });
+  return {
+    total: deals.length,
+    stages: order.map(s => ({ etapa: s.etapa, total: cnt[s.etapa] || 0, kind: kinds[s.etapa] || null }))
+  };
+}
+function funnelHtml(fp) {
+  if (!fp.stages.length) return emptyDashed('Sem etapas de funil no CRM.', 'Verifique o pipeline no Kommo.');
+  const max = Math.max.apply(null, fp.stages.map(s => s.total).concat([1]));
+  let prev = null, first = true;
+  const rows = fp.stages.map(s => {
+    const w = s.total / max * 100;
+    let pct = '';
+    if (!first) {
+      // Spec (componente 7): a partir da 2ª etapa, sempre "% da anterior".
+      // Para as terminais (ganho/perda), "anterior" = última etapa de progresso.
+      pct = (prev && prev > 0) ? fmt.dec(s.total / prev * 100, 0) + '% da<br>anterior' : '—';
+    }
+    if (!s.kind) { prev = s.total; first = false; }
+    const cls = s.kind === 'won' ? ' won' : (s.kind === 'lost' ? ' lost' : '');
+    return '<div class="funnel-row">' +
+      '<div class="f-label">' + esc(s.etapa) + '</div>' +
+      '<div class="f-track"><div class="f-bar' + cls + '" style="width:' + w + '%">' + fmt.num(s.total) + '</div></div>' +
+      '<div class="f-pct">' + pct + '</div></div>';
+  }).join('');
+  return '<div class="funnel">' + rows + '</div>';
+}
 
 /* ============================================================
-   Chart.js — registry e defaults
+   Chart.js — defaults, registry, helpers
    ============================================================ */
 function chartsReady() { return typeof Chart !== 'undefined'; }
 function setupChartDefaults() {
   if (!chartsReady()) return;
-  Chart.defaults.color = C.muted;
-  Chart.defaults.borderColor = C.grid;
-  Chart.defaults.font.family = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-  Chart.defaults.font.size = 11.5;
+  Chart.defaults.color = P.muted;
+  Chart.defaults.borderColor = P.grid;
+  Chart.defaults.font.family = "'Inter','Segoe UI',system-ui,-apple-system,Roboto,sans-serif";
+  Chart.defaults.font.size = 11;
   Chart.defaults.animation = false;
   Chart.defaults.locale = 'pt-BR';
-  Chart.defaults.plugins.legend.labels.boxWidth = 10;
-  Chart.defaults.plugins.legend.labels.boxHeight = 10;
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.tooltip.backgroundColor = '#1b2129';
-  Chart.defaults.plugins.tooltip.borderColor = C.grid;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#0D1524';
+  Chart.defaults.plugins.tooltip.borderColor = P.border;
   Chart.defaults.plugins.tooltip.borderWidth = 1;
-  Chart.defaults.plugins.tooltip.titleColor = C.text;
-  Chart.defaults.plugins.tooltip.bodyColor = C.text;
+  Chart.defaults.plugins.tooltip.titleColor = P.text;
+  Chart.defaults.plugins.tooltip.bodyColor = P.soft;
+  Chart.defaults.plugins.tooltip.padding = 10;
 }
 function destroyAllCharts() {
-  Object.keys(CHARTS).forEach(id => { try { CHARTS[id].destroy(); } catch (e) { /* noop */ } delete CHARTS[id]; });
+  Object.keys(CHARTS).forEach(id => {
+    try { CHARTS[id].destroy(); } catch (e) { /* noop */ }
+    delete CHARTS[id];
+  });
 }
 function makeChart(id, config) {
   const el = document.getElementById(id);
   if (!el) return;
   if (!chartsReady()) {
-    el.parentElement.innerHTML = emptyBox('Chart.js não carregou (verifique a conexão com o CDN).');
+    el.parentElement.innerHTML = emptyDashed('Chart.js não carregou.', 'Verifique a conexão com o CDN e recarregue.');
     return;
   }
   if (CHARTS[id]) { try { CHARTS[id].destroy(); } catch (e) { /* noop */ } delete CHARTS[id]; }
   CHARTS[id] = new Chart(el, config);
 }
-function moneyTicks() {
-  return { callback: v => 'R$ ' + Number(v).toLocaleString('pt-BR') };
+function legendTop() {
+  return {
+    display: true, position: 'top', align: 'center',
+    labels: { boxWidth: 28, boxHeight: 14, color: P.soft, padding: 14, usePointStyle: false }
+  };
+}
+function xDaily() {
+  return {
+    grid: { display: false },
+    ticks: { color: P.muted, maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 26 }
+  };
+}
+function xCat(extra) {
+  // maxRotation/minRotation 0 desfazem a rotação de 45° herdada de xDaily()
+  // via deepMerge em baseOpts — eixo categórico tem rótulo reto.
+  const o = { grid: { display: false }, ticks: { color: P.muted, maxRotation: 0, minRotation: 0 } };
+  return deepMerge(o, extra || {});
+}
+function yCount(extra) {
+  const o = {
+    beginAtZero: true,
+    grid: { color: P.grid, drawTicks: false },
+    // Sem precision:0 — a spec mostra ticks fracionários (0,5 · 1,0 …) nos
+    // gráficos de contagem baixa; locale pt-BR garante a vírgula decimal.
+    ticks: { color: P.muted }
+  };
+  return deepMerge(o, extra || {});
+}
+function yMoney(extra) {
+  return yCount(deepMerge({ ticks: { callback: v => 'R$ ' + v } }, extra || {}));
 }
 function moneyTooltip() {
-  return { label: ctx => (ctx.dataset.label ? ctx.dataset.label + ': ' : '') + fmt.currency(ctx.parsed.y != null ? ctx.parsed.y : ctx.parsed.x) };
+  return {
+    label: ctx => {
+      // Em barra horizontal (indexAxis 'y'), o valor está em parsed.x e
+      // parsed.y é o ÍNDICE da categoria — nunca null (Chart.js 4).
+      const v = ctx.chart.options.indexAxis === 'y' ? ctx.parsed.x : ctx.parsed.y;
+      return (ctx.dataset.label ? ctx.dataset.label + ': ' : '') + fmt.currency(v);
+    }
+  };
 }
 function baseOpts(extra) {
   const o = {
@@ -187,10 +309,7 @@ function baseOpts(extra) {
     animation: false,
     interaction: { mode: 'index', intersect: false },
     plugins: { legend: { display: false } },
-    scales: {
-      x: { grid: { color: C.grid, drawTicks: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
-      y: { grid: { color: C.grid, drawTicks: false }, beginAtZero: true, ticks: { precision: 0 } }
-    }
+    scales: { x: xDaily(), y: yCount() }
   };
   return deepMerge(o, extra || {});
 }
@@ -206,34 +325,36 @@ function deepMerge(a, b) {
 }
 
 /* ============================================================
-   Roteamento (SPA por hash)
+   Roteamento (SPA por hash) + sidebar
    ============================================================ */
 const PAGES = [
-  { id: 'executivo', label: 'Visão Executiva', render: renderExecutivo },
-  { id: 'crm', label: 'Funil CRM', render: renderCRM },
-  { id: 'atendimento', label: 'Atendimento', render: renderAtendimento },
-  { id: 'meta', label: 'Meta Ads', render: renderMeta },
-  { id: 'google', label: 'Google Ads', render: renderGoogle },
-  { id: 'utm', label: 'Rastreamento (UTM)', render: renderUTM },
-  { id: 'relatorio', label: 'Relatório', render: renderRelatorio }
+  { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoGeral },
+  { id: 'funil', label: 'Funil CRM', ic: '🎯', render: renderFunilCRM },
+  { id: 'atendimento', label: 'Atendimento', ic: '💬', render: renderAtendimento },
+  { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaAds },
+  { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
+  { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
+  { id: 'publico', label: 'Público', ic: '👥', render: renderPublico },
+  { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucao },
+  { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM }
 ];
 function currentPageId() {
   const h = (location.hash || '').replace(/^#\/?/, '');
-  return PAGES.some(p => p.id === h) ? h : 'executivo';
+  return PAGES.some(p => p.id === h) ? h : 'visao';
 }
 function route() {
   if (!DATA) return;
   const id = currentPageId();
   destroyAllCharts();
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === id));
-  document.body.classList.toggle('hide-filter', id === 'relatorio' || id === 'google');
   const page = PAGES.find(p => p.id === id);
+  document.getElementById('page-title').textContent = 'Terrana B2B · ' + page.label;
   page.render(document.getElementById('content'));
   window.scrollTo(0, 0);
 }
 
 /* ============================================================
-   Filtro de período global
+   Filtro de período global (De / Até / Todo período)
    ============================================================ */
 function computeDataBounds() {
   const dates = [];
@@ -252,7 +373,7 @@ function setPreset(p, rerender) {
   FILTER.preset = p;
   if (p === 'all') {
     FILTER.start = DATA_MIN; FILTER.end = DATA_MAX;
-  } else {
+  } else if (p !== 'custom') {
     const n = parseInt(p, 10);
     FILTER.end = DATA_MAX;
     FILTER.start = addDays(DATA_MAX, -(n - 1));
@@ -261,11 +382,11 @@ function setPreset(p, rerender) {
   if (rerender !== false) route();
 }
 function syncFilterUI() {
-  document.querySelectorAll('#presets .preset').forEach(b =>
-    b.classList.toggle('active', b.dataset.preset === FILTER.preset));
   const s = document.getElementById('f-start'), e = document.getElementById('f-end');
-  if (s) s.value = FILTER.start;
-  if (e) e.value = FILTER.end;
+  const sel = document.getElementById('f-preset');
+  if (s) s.value = FILTER.start || '';
+  if (e) e.value = FILTER.end || '';
+  if (sel) sel.value = FILTER.preset;
 }
 function onDateInput() {
   const s = document.getElementById('f-start').value;
@@ -278,258 +399,290 @@ function onDateInput() {
   route();
 }
 function buildFilterUI() {
-  const presets = [
-    { p: '7', label: '7 dias' },
-    { p: '30', label: '30 dias' },
-    { p: '90', label: '90 dias' },
-    { p: 'all', label: 'Tudo' }
-  ];
-  document.getElementById('presets').innerHTML = presets.map(x =>
-    '<button class="preset" data-preset="' + x.p + '">' + x.label + '</button>').join('');
-  document.querySelectorAll('#presets .preset').forEach(b =>
-    b.addEventListener('click', () => setPreset(b.dataset.preset)));
   document.getElementById('f-start').addEventListener('change', onDateInput);
   document.getElementById('f-end').addEventListener('change', onDateInput);
-}
-function periodLabel() {
-  return fmt.dateFull(FILTER.start) + ' a ' + fmt.dateFull(FILTER.end);
+  document.getElementById('f-preset').addEventListener('change', ev => {
+    if (ev.target.value !== 'custom') setPreset(ev.target.value);
+  });
 }
 
 /* ============================================================
-   PÁGINA 1 — Visão Executiva
+   P1 · VISÃO GERAL
    ============================================================ */
-function renderExecutivo(el) {
-  const L = fdays(DATA.leads.daily);
-  const M = fdays(DATA.meta_ads.daily);
-  const leads = sum(L, 'total');
-  const pagos = sum(L, 'pagos');
-  const gasto = sum(M, 'gasto');
-  const deals = (DATA.crm.deals_minimal || []).filter(d => inPeriod(d.criado_em));
-  const ganhos = deals.filter(d => d.ganho).length;
+function renderVisaoGeral(el) {
+  const L = fdays((DATA.leads || {}).daily);
+  const leadsCRM = sum(L, 'total');
+  const leadsPagos = sum(L, 'pagos');
+  const campDaily = (DATA.meta_ads || {}).campaign_daily || [];
+  const captP = fdays(campDaily).filter(r => tipoCampanha(r.campanha) === 'captacao');
+  const investCapt = sum(captP, 'gasto');
+  const leadsPlat = sum(fdays((DATA.meta_ads || {}).daily), 'leads_plat');
+  const deals = ((DATA.crm || {}).deals_minimal || []).filter(d => inPeriod(d.criado_em));
+  const vendas = deals.filter(d => d.ganho).length;
   const perdidos = deals.filter(d => d.perdido).length;
-  const conv = leads > 0 ? ganhos / leads * 100 : null;
-  const cpl = pagos > 0 ? gasto / pagos : null;
-  const cplTargetMsg = (DATA.config && DATA.config.cpl_target_meta === 0)
-    ? 'meta de CPL não definida' : null;
-  const alertas = (DATA.relatorio && DATA.relatorio.alertas) || [];
+  const cpl = (investCapt > 0 && leadsPagos > 0) ? investCapt / leadsPagos : null;
+  const cobPct = ((DATA.utm || {}).cobertura || {}).pct;
 
-  let html = '<h2 class="page-title">Visão Executiva</h2>' +
-    '<p class="page-sub">Período: ' + periodLabel() + ' · Leads e conversões sempre do CRM (fonte de verdade).</p>';
+  let html = qualityBanners(true);
 
-  html += '<div class="kpis">' +
-    kpi('Leads (CRM)', fmt.num(leads), 'criados no período') +
-    kpi('Leads pagos (CRM)', fmt.num(pagos), 'com UTM de tráfego pago') +
-    kpi('Investimento Meta', fmt.currency(gasto), 'gasto no período') +
-    kpi('CPL CRM pago', cpl == null ? '—' : fmt.currency(cpl),
-      cpl == null ? 'sem leads pagos no período' : (cplTargetMsg || 'gasto Meta ÷ leads pagos CRM')) +
-    kpi('Ganhos', fmt.num(ganhos), 'por data de criação do lead', ganhos > 0 ? 'good' : '') +
-    kpi('Perdidos', fmt.num(perdidos), 'por data de criação do lead', perdidos > 0 ? 'bad' : '') +
-    kpi('Taxa de conversão', conv == null ? '—' : fmt.pct(conv), 'ganhos ÷ leads do período') +
+  html += '<div class="kpis cols-6">' +
+    kpi('Leads no CRM', fmt.num(leadsCRM), 'criados no período · Pipeline de venda B2B') +
+    kpi('Investimento', fmt.currency(investCapt), 'Meta (captação B2B) · Google: sem integração') +
+    kpi('CPL (CRM)', cpl == null ? null : fmt.currency(cpl),
+      cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true }) +
+    kpi('Leads plataforma', fmt.num(leadsPlat), 'reportado pela plataforma (referência)') +
+    kpi('Vendas', fmt.num(vendas), 'no período') +
+    kpi('Perdidos', fmt.num(perdidos), 'no período') +
     '</div>';
 
-  const sL = dailySeries(DATA.leads.daily, ['total', 'pagos']);
-  const sM = dailySeries(DATA.meta_ads.daily, ['gasto']);
+  html += '<div class="note-blue">* <strong>CPL (CRM)</strong> = investimento nas campanhas de captação (formulário de leads) ÷ leads do CRM ' +
+    'atribuídos ao tráfego pago via UTM. Só <strong>' + fmt.pct(cobPct, 0) + '</strong> dos leads chegam com UTM — o CPL descreve essa fatia rastreada, não o total. ' +
+    'E-commerce e impulsionamento ficam fora da conta (ver página Institucional & Impulsionamento).</div>';
+
+  const sL = dailySeries((DATA.leads || {}).daily, ['total']);
+  const sI = dailySeries(captP, ['gasto']);
 
   html += '<div class="grid-2">' +
     (sL
-      ? chartCard('Leads por dia — total × pagos (CRM)', 'ch-exec-leads')
-      : card('Leads por dia — total × pagos (CRM)', emptyBox())) +
-    (sM
-      ? chartCard('Investimento Meta por dia', 'ch-exec-gasto')
-      : card('Investimento Meta por dia', emptyBox())) +
+      ? chartCard('Leads por dia', 'entradas no pipeline (CRM)', 'ch-vg-leads')
+      : card('Leads por dia', 'entradas no pipeline (CRM)', emptyDashed('Sem leads no período selecionado.', 'Ajuste o filtro de período no topo.'))) +
+    (sI
+      ? chartCard('Investimento por dia', 'gasto Meta Ads da frente (campanhas de captação)', 'ch-vg-invest')
+      : card('Investimento por dia', 'gasto Meta Ads da frente (campanhas de captação)', emptyDashed('Sem investimento de captação no período.', 'A campanha de captação B2B começou em 26/06 — amplie o período.'))) +
     '</div>';
 
-  html += card('Alertas de qualidade de dado',
-    alertas.length
-      ? '<ul class="alert-list">' + alertas.map(a =>
-        '<li><span class="alert-tipo">' + esc(a.tipo) + '</span><br>' + esc(a.texto) + '</li>').join('') + '</ul>'
-      : emptyBox('Nenhum alerta no momento.'),
-    '<span class="tag ref">avisos honestos do ETL</span>');
+  const fp = funnelPeriodStages();
+  html += card('Funil B2B — visão do período',
+    'leads criados no período, pela etapa ATUAL de cada um · etapas de ganho/perda são terminais',
+    fp.total ? funnelHtml(fp) : emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
+
+  // ----- Leads por origem (utm_source) -----
+  // Atenção: parte dos leads rastreados chega com utm_campaign mas SEM
+  // utm_source — por isso o fallback é "(sem utm_source)", não "(sem UTM)":
+  // a cobertura de UTM (nota azul acima) conta qualquer parâmetro presente.
+  const bySrc = {};
+  deals.forEach(d => {
+    const s = d.utm_source || '(sem utm_source)';
+    if (!bySrc[s]) bySrc[s] = { leads: 0, vendas: 0, perdidos: 0 };
+    bySrc[s].leads++;
+    if (d.ganho) bySrc[s].vendas++;
+    if (d.perdido) bySrc[s].perdidos++;
+  });
+  const srcRows = Object.entries(bySrc).sort((a, b) => b[1].leads - a[1].leads).map(([src, v]) =>
+    '<tr><td class="name">' + esc(src) + '</td>' +
+    '<td class="r">' + fmt.num(v.leads) + '</td>' +
+    '<td class="r">' + fmt.num(v.vendas) + '</td>' +
+    '<td class="r">' + fmt.num(v.perdidos) + '</td></tr>').join('');
+  html += card('Leads por origem (utm_source)',
+    'origem gravada no lead ao entrar no CRM · sem utm_source = "(sem utm_source)"',
+    srcRows
+      ? tableWrap([{ t: 'utm_source' }, { t: 'Leads', r: 1 }, { t: 'Vendas', r: 1 }, { t: 'Perdidos', r: 1 }], srcRows) +
+      '<div class="note">Parte dos leads rastreados chega com utm_campaign mas sem utm_source — a cobertura de UTM ' +
+      'citada acima conta qualquer parâmetro presente, por isso é maior que a soma das origens nomeadas nesta tabela. ' +
+      'Detalhe completo na página Rastreamento (UTM).</div>'
+      : emptyDashed('Nenhum lead no período selecionado.'));
+
+  // ----- Qualidade de atendimento por responsável -----
+  const qual = DATA.qualidade_responsavel || [];
+  const qualRows = qual.map(r =>
+    '<tr><td class="name">' + esc(r.responsavel || 'sem responsável') + '</td>' +
+    '<td class="r">' + fmt.num(r.leads) + '</td>' +
+    '<td class="r">' + fmt.num(r.vendas) + '</td>' +
+    '<td class="r">' + fmt.num(r.perdidos) + '</td>' +
+    '<td class="r">' + fmt.pct(r.taxa_conv) + '</td>' +
+    '<td class="r">' + fmt.pct(r.sem_1o_atend_pct) + '</td>' +
+    '<td class="r">' + fmt.days(r.tempo_1o_atend_dias) + '</td>' +
+    '<td class="r">' + fmt.days(r.parado_dias) + '</td></tr>').join('');
+  html += card('Qualidade de atendimento por responsável',
+    'estado atual do funil — <strong>não usa o filtro de período</strong> · "1º atendimento" = lead saiu da etapa de entrada · resolução diária',
+    qualRows
+      ? tableWrap([
+        { t: 'Responsável' }, { t: 'Leads', r: 1 }, { t: 'Vendas', r: 1 }, { t: 'Perdidos', r: 1 },
+        { t: 'Taxa conv.', r: 1 }, { t: 'Sem 1º atend.', r: 1 }, { t: 'Tempo 1º atend.', r: 1 }, { t: 'Parado (médio)', r: 1 }
+      ], qualRows)
+      : emptyDashed('Sem dados por responsável.'));
 
   el.innerHTML = html;
 
   if (sL) {
-    makeChart('ch-exec-leads', {
-      type: 'line',
+    makeChart('ch-vg-leads', {
+      type: 'bar',
       data: {
         labels: sL.labels,
-        datasets: [
-          { label: 'Leads (total)', data: sL.data.total, borderColor: C.green, backgroundColor: C.greenSoft, borderWidth: 2, pointRadius: 2, tension: .3, fill: true },
-          { label: 'Leads pagos', data: sL.data.pagos, borderColor: C.blue, backgroundColor: C.blueSoft, borderWidth: 2, pointRadius: 2, tension: .3, fill: false }
-        ]
-      },
-      options: baseOpts({ plugins: { legend: { display: true, position: 'bottom' } } })
-    });
-  }
-  if (sM) {
-    makeChart('ch-exec-gasto', {
-      type: 'bar',
-      data: {
-        labels: sM.labels,
-        datasets: [{ label: 'Gasto (R$)', data: sM.data.gasto, backgroundColor: C.green, borderRadius: 4, borderSkipped: 'bottom' }]
-      },
-      options: baseOpts({
-        plugins: { tooltip: { callbacks: moneyTooltip() } },
-        scales: { y: { ticks: moneyTicks() } }
-      })
-    });
-  }
-}
-
-/* ============================================================
-   PÁGINA 2 — Funil CRM
-   ============================================================ */
-function renderCRM(el) {
-  const crm = DATA.crm;
-  const funnel = (crm.funnel || []).slice().sort((a, b) => a.sort - b.sort);
-  const active = (crm.active_funnel || []).slice().sort((a, b) => a.sort - b.sort);
-
-  // perdas do período (eixo padrão = data de criação do lead — regra de ouro nº 8)
-  const lossesP = (crm.losses_daily || []).filter(r => inPeriod(r[LOSS_AXIS]));
-  const motivos = {};
-  lossesP.forEach(r => { const m = r.motivo || 'Não informado'; motivos[m] = (motivos[m] || 0) + 1; });
-  const motivosArr = Object.entries(motivos).sort((a, b) => b[1] - a[1]);
-
-  const byDay = {};
-  lossesP.forEach(r => { const d = r[LOSS_AXIS]; byDay[d] = (byDay[d] || 0) + 1; });
-  const lossDays = Object.keys(byDay).sort();
-  let lossSeries = null;
-  if (lossDays.length) {
-    const days = dayRange(lossDays[0], lossDays[lossDays.length - 1]);
-    lossSeries = { labels: days.map(fmt.date), data: days.map(d => byDay[d] || 0) };
-  }
-
-  const ciclo = crm.ciclo || {};
-  const resp = crm.by_responsavel || [];
-
-  let html = '<h2 class="page-title">Funil CRM</h2>' +
-    '<p class="page-sub">Período: ' + periodLabel() + ' · Funis por etapa são a foto atual do CRM; perdas respeitam o filtro.</p>';
-
-  html += '<div class="kpis">' +
-    kpi('Negócios (total)', fmt.num(crm.total_deals), 'foto atual') +
-    kpi('Ganhos', fmt.num(crm.total_won), 'foto atual', 'good') +
-    kpi('Perdidos', fmt.num(crm.total_lost), 'foto atual', 'bad') +
-    kpi('Em aberto', fmt.num(crm.total_open), 'foto atual') +
-    kpi('Taxa de fechamento', fmt.pct(crm.taxa_fechamento), 'ganhos ÷ todos os negócios') +
-    kpi('Fechamento (decididos)', fmt.pct(crm.taxa_fechamento_decididos), 'ganhos ÷ (ganhos + perdidos)') +
-    '</div>';
-
-  html += '<div class="grid-2">' +
-    (funnel.length
-      ? chartCard('Funil por etapa atual', 'ch-crm-funnel', TAG_SNAPSHOT,
-        'Cada negócio contado na etapa em que está hoje — não é fluxo acumulado.')
-      : card('Funil por etapa atual', emptyBox('Sem dados de funil.'), TAG_SNAPSHOT)) +
-    (active.length
-      ? chartCard('Funil ativo (sem ganhos/perdidos)', 'ch-crm-active', TAG_SNAPSHOT)
-      : card('Funil ativo', emptyBox('Sem negócios em aberto.'), TAG_SNAPSHOT)) +
-    '</div>';
-
-  const axisToggle =
-    '<span class="spacer"></span><div class="toggle-group" title="criado = data de criação do lead (mesmo eixo dos KPIs de leads — a perda é subconjunto do período); data = dia em que a perda foi registrada no CRM.">' +
-    '<button class="' + (LOSS_AXIS === 'criado' ? 'active' : '') + '" onclick="setLossAxis(\'criado\')">por criação do lead</button>' +
-    '<button class="' + (LOSS_AXIS === 'data' ? 'active' : '') + '" onclick="setLossAxis(\'data\')">por data da perda</button>' +
-    '</div>';
-
-  html += '<div class="grid-2">' +
-    (motivosArr.length
-      ? chartCard('Motivos de perda no período', 'ch-crm-losses')
-      : card('Motivos de perda no período', emptyBox())) +
-    (lossSeries
-      ? card('Perdas ao longo do tempo',
-        '<div class="chart-box"><canvas id="ch-crm-losses-daily"></canvas></div>' +
-        '<div class="note">Eixo atual: <strong>' + (LOSS_AXIS === 'criado' ? 'data de criação do lead' : 'data em que a perda foi registrada') +
-        '</strong>. Por criação, a perda entra no mesmo período do lead (percentuais consistentes); por data da perda, mostra quando o time marcou a perda.</div>',
-        axisToggle)
-      : card('Perdas ao longo do tempo', emptyBox(), axisToggle)) +
-    '</div>';
-
-  const respRows = resp.map(r => {
-    const tx = r.total > 0 ? r.ganhos / r.total * 100 : null;
-    return '<tr><td class="name">' + esc(r.responsavel) + '</td>' +
-      '<td class="r">' + fmt.num(r.total) + '</td>' +
-      '<td class="r">' + fmt.num(r.ganhos) + '</td>' +
-      '<td class="r">' + (tx == null ? '—' : fmt.pct(tx)) + '</td></tr>';
-  }).join('');
-
-  html += '<div class="grid-2">' +
-    card('Por responsável',
-      resp.length
-        ? '<div class="table-wrap"><table><thead><tr><th>Responsável</th><th class="r">Negócios</th><th class="r">Ganhos</th><th class="r">Taxa</th></tr></thead><tbody>' +
-        respRows + '</tbody></table></div>'
-        : emptyBox('Sem dados por responsável.'),
-      TAG_SNAPSHOT) +
-    card('Ciclo de venda (criação → ganho)',
-      (ciclo.n || 0) > 0
-        ? '<div class="kpis" style="margin-bottom:0">' +
-        kpi('Mediana', fmt.dec(ciclo.mediana_dias, 1) + ' dias') +
-        kpi('Mínimo', fmt.dec(ciclo.min_dias, 1) + ' dias') +
-        kpi('Máximo', fmt.dec(ciclo.max_dias, 1) + ' dias') +
-        '</div><div class="note">Base: ' + fmt.num(ciclo.n) + ' negócios ganhos (todos os fechamentos registrados).</div>'
-        : emptyBox('Nenhum negócio ganho ainda — sem ciclo para medir.'),
-      TAG_SNAPSHOT) +
-    '</div>';
-
-  el.innerHTML = html;
-
-  if (funnel.length) {
-    makeChart('ch-crm-funnel', {
-      type: 'bar',
-      data: {
-        labels: funnel.map(f => f.etapa),
-        datasets: [{
-          label: 'Negócios', data: funnel.map(f => f.total), borderRadius: 4, borderSkipped: 'left',
-          backgroundColor: funnel.map(f =>
-            f.etapa === 'Fechado - perdido' ? C.red : (f.etapa === 'Fechado - ganho' ? C.greenStrong : C.green))
-        }]
-      },
-      options: baseOpts({
-        indexAxis: 'y',
-        scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { grid: { display: false } } }
-      })
-    });
-  }
-  if (active.length) {
-    makeChart('ch-crm-active', {
-      type: 'bar',
-      data: {
-        labels: active.map(f => f.etapa),
-        datasets: [{ label: 'Em aberto', data: active.map(f => f.total), backgroundColor: C.blue, borderRadius: 4, borderSkipped: 'left' }]
-      },
-      options: baseOpts({
-        indexAxis: 'y',
-        scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { grid: { display: false } } }
-      })
-    });
-  }
-  if (motivosArr.length) {
-    makeChart('ch-crm-losses', {
-      type: 'bar',
-      data: {
-        labels: motivosArr.map(m => m[0]),
-        datasets: [{ label: 'Perdas', data: motivosArr.map(m => m[1]), backgroundColor: C.red, borderRadius: 4, borderSkipped: 'left' }]
-      },
-      options: baseOpts({
-        indexAxis: 'y',
-        scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { grid: { display: false } } }
-      })
-    });
-  }
-  if (lossSeries) {
-    makeChart('ch-crm-losses-daily', {
-      type: 'bar',
-      data: {
-        labels: lossSeries.labels,
-        datasets: [{ label: 'Perdas', data: lossSeries.data, backgroundColor: C.red, borderRadius: 4, borderSkipped: 'bottom' }]
+        datasets: [{ label: 'Leads', data: sL.data.total, backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom' }]
       },
       options: baseOpts({})
     });
   }
+  if (sI) {
+    makeChart('ch-vg-invest', {
+      type: 'bar',
+      data: {
+        labels: sI.labels,
+        datasets: [{ label: 'Gasto (R$)', data: sI.data.gasto, backgroundColor: P.teal, borderRadius: 4, borderSkipped: 'bottom' }]
+      },
+      options: baseOpts({
+        plugins: { tooltip: { callbacks: moneyTooltip() } },
+        scales: { y: yMoney() }
+      })
+    });
+  }
 }
-function setLossAxis(a) { LOSS_AXIS = a; route(); }
-window.setLossAxis = setLossAxis;
 
 /* ============================================================
-   PÁGINA 3 — Atendimento
+   P2 · FUNIL CRM
+   ============================================================ */
+function renderFunilCRM(el) {
+  const crm = DATA.crm || {};
+  const deals = (crm.deals_minimal || []).filter(d => inPeriod(d.criado_em));
+  const vendas = deals.filter(d => d.ganho).length;
+  const perdidos = deals.filter(d => d.perdido).length;
+  const andamento = deals.length - vendas - perdidos;
+  const taxa = deals.length > 0 ? vendas / deals.length * 100 : null;
+
+  // perdas do período — eixo: data de criação do lead (mesmo eixo dos KPIs)
+  const lossesP = (crm.losses_daily || []).filter(r => inPeriod(r.criado));
+  const motivos = {};
+  lossesP.forEach(r => { const m = r.motivo || 'Não informado'; motivos[m] = (motivos[m] || 0) + 1; });
+  const motivosArr = Object.entries(motivos).sort((a, b) => b[1] - a[1]);
+
+  // tempo até perda: criado -> data da perda
+  const diffs = lossesP
+    .filter(r => r.data && r.criado)
+    .map(r => (new Date(r.data + 'T12:00:00') - new Date(r.criado + 'T12:00:00')) / 864e5)
+    .filter(v => v >= 0);
+  const tPerda = diffs.length ? diffs.reduce((a, b) => a + b, 0) / diffs.length : null;
+  const ciclo = crm.ciclo || {};
+
+  let html = qualityBanners(false);
+
+  html += '<div class="kpis cols-5">' +
+    kpi('Leads no período', fmt.num(deals.length), 'Pipeline de venda B2B') +
+    kpi('Em andamento', fmt.num(andamento), 'leads vivos no funil') +
+    kpi('Vendas', fmt.num(vendas), 'no período') +
+    kpi('Perdidos', fmt.num(perdidos), 'no período') +
+    kpi('Taxa de conversão', taxa == null ? null : fmt.pct(taxa), 'vendas ÷ leads', { teal: true }) +
+    '</div>';
+
+  const fp = funnelPeriodStages();
+  html += card('Funil completo',
+    'etapa atual dos leads criados no período — etapas de ganho/perda são terminais, não progresso',
+    fp.total ? funnelHtml(fp) : emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
+
+  // ----- Motivos de perda (donut) + Leads perdidos (tabela) -----
+  const LOSS_CAP = 15;
+  const lossRows = lossesP.slice().sort((a, b) => {
+    const x = a.criado || '', y = b.criado || '';
+    return x === y ? 0 : (y > x ? 1 : -1);          // desc, comparator consistente
+  }).slice(0, LOSS_CAP).map(r =>
+    '<tr><td>' + fmt.dateFull(r.criado) + '</td>' +
+    '<td class="peri">—</td>' +
+    (r.motivo ? '<td class="name">' + esc(r.motivo) + '</td>' : '<td class="dim">não informado</td>') +
+    '<td class="peri">' + (r.utm_source
+      ? esc(r.utm_source)
+      : (r.utm_campaign
+        ? '<span class="muted" title="lead sem utm_source — mostrando utm_campaign">' + esc(r.utm_campaign) + '</span>'
+        : '<span class="muted">(sem UTM)</span>')) + '</td></tr>').join('');
+  const lossNote = (lossesP.length > LOSS_CAP ? 'Mostrando ' + LOSS_CAP + ' de ' + fmt.num(lossesP.length) + ' perdas do período. ' : '') +
+    'A etapa em que o lead estava ao ser perdido ainda não é exportada pelo ETL — coluna fica "—" até o histórico de etapas ser acumulado.';
+  html += '<div class="grid-2">' +
+    (motivosArr.length
+      ? chartCard('Motivos de perda', 'leads perdidos no período (por data de criação do lead)', 'ch-crm-motivos')
+      : card('Motivos de perda', 'leads perdidos no período', emptyDashed('Nenhuma perda no período selecionado.'))) +
+    card('Leads perdidos', 'detalhe (data de criação do lead)',
+      lossRows
+        ? tableWrap([{ t: 'Criado' }, { t: 'Etapa' }, { t: 'Motivo' }, { t: 'Origem' }], lossRows) + '<div class="note">' + lossNote + '</div>'
+        : emptyDashed('Nenhuma perda no período selecionado.')) +
+    '</div>';
+
+  // ----- 3 stat cards -----
+  html += '<div class="kpis cols-3">' +
+    kpi('Tempo médio até venda', (ciclo.n || 0) > 0 ? fmt.days(ciclo.mediana_dias) : null,
+      (ciclo.n || 0) > 0 ? 'mediana da criação ao fechamento · base: ' + fmt.num(ciclo.n) + ' vendas (toda a série)' : 'nenhuma venda registrada ainda') +
+    kpi('Tempo médio até perda', tPerda == null ? null : fmt.days(tPerda),
+      tPerda == null ? 'sem perdas no período' : 'da criação à perda · ' + fmt.num(diffs.length) + ' perdas do período') +
+    kpi('Histórico de etapas', null, 'o ETL ainda não acumula histórico diário de etapas — a precisão do tempo em etapa cresce com o histórico') +
+    '</div>';
+
+  // ----- Tempo na etapa + leads parados (sem dado no resumo atual) -----
+  html += '<div class="grid-2">' +
+    card('Tempo médio na etapa atual', 'dias parados por etapa (leads vivos)',
+      emptyDashed('Sem histórico diário de etapas acumulado.',
+        'Quando o ETL passar a registrar o histórico de etapas por lead, esta visão é habilitada automaticamente.')) +
+    card('Leads parados há mais dias', 'quem precisa de atenção do atendimento',
+      emptyDashed('O resumo atual não exporta leads individuais com dias de parada.',
+        'Habilite a exportação de "leads parados" no ETL para ativar esta visão. Média atual da base: ' +
+        fmt.days(((DATA.qualidade_responsavel || [])[0] || {}).parado_dias) + ' parado por lead.')) +
+    '</div>';
+
+  // ----- Valor em negociação + Perdas por mês × motivo -----
+  const lossesAll = crm.losses_daily || [];
+  const mesesPerda = Array.from(new Set(lossesAll.map(r => (r.criado || '').slice(0, 7)).filter(Boolean))).sort();
+  const motivosAll = Array.from(new Set(lossesAll.map(r => r.motivo || 'Não informado')));
+  html += '<div class="grid-2">' +
+    card('Valor em negociação por etapa', 'campo "valor" dos leads vivos no CRM',
+      emptyDashed('Nenhum lead vivo com valor preenchido no Kommo.',
+        'Preencha o campo "Valor" dos negócios no Kommo para habilitar esta visão (e o ticket médio real).')) +
+    (mesesPerda.length
+      ? chartCard('Perdas por mês × motivo', 'toda a série · mês de criação do lead perdido', 'ch-crm-perdas-mes')
+      : card('Perdas por mês × motivo', 'toda a série', emptyDashed('Nenhuma perda registrada ainda.'))) +
+    '</div>';
+
+  el.innerHTML = html;
+
+  if (motivosArr.length) {
+    makeChart('ch-crm-motivos', {
+      type: 'doughnut',
+      data: {
+        labels: motivosArr.map(m => m[0]),
+        datasets: [{
+          data: motivosArr.map(m => m[1]),
+          backgroundColor: motivosArr.map((m, i) => P.redShades[i % P.redShades.length]),
+          borderColor: '#ffffff',
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        cutout: '62%',
+        plugins: {
+          legend: { display: true, position: 'right', labels: { boxWidth: 14, boxHeight: 14, color: P.soft, padding: 10 } }
+        }
+      }
+    });
+  }
+  if (mesesPerda.length) {
+    const byMes = {};
+    lossesAll.forEach(r => {
+      const m = (r.criado || '').slice(0, 7);
+      if (!m) return;
+      const mo = r.motivo || 'Não informado';
+      if (!byMes[m]) byMes[m] = {};
+      byMes[m][mo] = (byMes[m][mo] || 0) + 1;
+    });
+    makeChart('ch-crm-perdas-mes', {
+      type: 'bar',
+      data: {
+        labels: mesesPerda.map(mesLabel),
+        datasets: motivosAll.map((mo, i) => ({
+          label: mo,
+          data: mesesPerda.map(m => (byMes[m] || {})[mo] || 0),
+          backgroundColor: P.redShades[i % P.redShades.length],
+          borderRadius: 3,
+          borderSkipped: 'bottom',
+          stack: 'perdas'
+        }))
+      },
+      options: baseOpts({
+        plugins: { legend: legendTop() },
+        scales: { x: xCat({ stacked: true }), y: yCount({ stacked: true }) }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   P3 · ATENDIMENTO (página extra da Terrana)
    ============================================================ */
 function renderAtendimento(el) {
   const at = DATA.atendimento || {};
@@ -559,35 +712,37 @@ function renderAtendimento(el) {
     }
   });
 
-  let html = '<h2 class="page-title">Atendimento</h2>' +
-    '<p class="page-sub">Período: ' + periodLabel() + ' · Tempos de resposta medem a espera por uma <strong>pessoa</strong> — o robô (&lt; 30 s) é contado à parte.</p>';
+  let html = qualityBanners(false);
+  html += banner('blue', 'Os tempos de resposta medem a espera por uma <strong>pessoa</strong> — o robô (resposta em &lt; 0,5 min) é contado à parte e excluído das medianas.');
 
-  html += '<div class="kpis">' +
-    kpi('Conversas', fmt.num(at.conversas_total), 'foto 180 dias — não filtra') +
-    kpi('Em aberto', fmt.num(at.em_aberto), 'foto atual — não filtra') +
-    kpi('Não lidas', fmt.num(at.nao_lidas), 'foto atual — não filtra') +
+  html += '<div class="kpis cols-6">' +
+    kpi('Conversas', fmt.num(at.conversas_total), 'foto 180 dias — não usa o filtro') +
+    kpi('Em aberto', fmt.num(at.em_aberto), 'foto atual — não usa o filtro') +
+    kpi('Não lidas', fmt.num(at.nao_lidas), 'foto atual — não usa o filtro') +
     kpi('Msgs recebidas', fmt.num(recebidas), 'no período') +
     kpi('Msgs enviadas', fmt.num(enviadas), 'no período') +
-    kpi('Resposta humana (mediana)', fmt.mins(med), humanas.length ? humanas.length + ' respostas humanas' : 'sem respostas humanas no período') +
-    kpi('Resposta humana (p90)', fmt.mins(p90), '90% respondidas até aqui') +
-    kpi('Respostas automáticas', autoPct == null ? '—' : fmt.pct(autoPct, 0),
-      'robô responde em <30 s; excluído dos tempos acima') +
+    kpi('Resposta humana (mediana)', humanas.length ? fmt.mins(med) : null,
+      humanas.length ? 'exclui robô (&lt; 0,5 min)' : 'sem respostas humanas no período', { teal: true }) +
+    '</div>';
+
+  html += '<div class="kpis cols-3">' +
+    kpi('Resposta humana (p90)', humanas.length ? fmt.mins(p90) : null, '90% das respostas humanas até aqui') +
+    kpi('Respostas automáticas', autoPct == null ? null : fmt.pct(autoPct, 0), 'robô responde em &lt; 30 s — excluído dos tempos acima') +
+    kpi('Respostas humanas', fmt.num(humanas.length), 'base dos tempos acima, no período') +
     '</div>';
 
   html += '<div class="grid-2">' +
     (msgs
-      ? chartCard('Mensagens por dia — recebidas × enviadas', 'ch-at-msgs')
-      : card('Mensagens por dia', emptyBox())) +
+      ? chartCard('Mensagens por dia', 'recebidas × enviadas no WhatsApp (Kommo)', 'ch-at-msgs')
+      : card('Mensagens por dia', 'recebidas × enviadas', emptyDashed('Sem mensagens no período selecionado.'))) +
     (humanas.length
-      ? chartCard('Tempo de resposta humana — distribuição', 'ch-at-buckets', null,
-        'Somente respostas de pessoas (≥ 0,5 min) dentro do período. As automáticas (' + fmt.num(nAuto) + ') ficam de fora para não maquiar o tempo real de espera.')
-      : card('Tempo de resposta humana — distribuição', emptyBox())) +
+      ? chartCard('Tempo de resposta humana — distribuição', 'somente respostas de pessoas (≥ 0,5 min) dentro do período', 'ch-at-buckets')
+      : card('Tempo de resposta humana — distribuição', 'somente respostas de pessoas', emptyDashed('Sem respostas humanas no período.'))) +
     '</div>';
 
   html += (at.msgs_hora && at.msgs_hora.length
-    ? chartCard('Mensagens recebidas por hora do dia', 'ch-at-hora', TAG_SNAP180,
-      'Ajuda a posicionar a equipe nos horários de pico.')
-    : card('Mensagens recebidas por hora do dia', emptyBox(), TAG_SNAP180));
+    ? chartCard('Mensagens recebidas por hora do dia', 'foto 180 dias — não usa o filtro · ajuda a posicionar a equipe nos horários de pico', 'ch-at-hora', 'short')
+    : card('Mensagens recebidas por hora do dia', 'foto 180 dias', emptyDashed('Sem dados de mensagens por hora.')));
 
   el.innerHTML = html;
 
@@ -597,11 +752,11 @@ function renderAtendimento(el) {
       data: {
         labels: msgs.labels,
         datasets: [
-          { label: 'Recebidas', data: msgs.data.recebidas, borderColor: C.green, backgroundColor: C.greenSoft, borderWidth: 2, pointRadius: 2, tension: .3 },
-          { label: 'Enviadas', data: msgs.data.enviadas, borderColor: C.blue, backgroundColor: C.blueSoft, borderWidth: 2, pointRadius: 2, tension: .3 }
+          { label: 'Recebidas', data: msgs.data.recebidas, borderColor: P.teal, backgroundColor: 'rgba(49,205,207,.15)', borderWidth: 2, pointRadius: 2, tension: .3 },
+          { label: 'Enviadas', data: msgs.data.enviadas, borderColor: P.blue, backgroundColor: 'rgba(40,116,252,.15)', borderWidth: 2, pointRadius: 2, tension: .3 }
         ]
       },
-      options: baseOpts({ plugins: { legend: { display: true, position: 'bottom' } } })
+      options: baseOpts({ plugins: { legend: legendTop() } })
     });
   }
   if (humanas.length) {
@@ -609,9 +764,9 @@ function renderAtendimento(el) {
       type: 'bar',
       data: {
         labels: buckets.map(b => b.label),
-        datasets: [{ label: 'Respostas humanas', data: bucketCounts, backgroundColor: C.green, borderRadius: 4, borderSkipped: 'bottom' }]
+        datasets: [{ label: 'Respostas humanas', data: bucketCounts, backgroundColor: P.amber, borderRadius: 4, borderSkipped: 'bottom' }]
       },
-      options: baseOpts({})
+      options: baseOpts({ scales: { x: xCat() } })
     });
   }
   if (at.msgs_hora && at.msgs_hora.length) {
@@ -620,223 +775,183 @@ function renderAtendimento(el) {
       type: 'bar',
       data: {
         labels: horas.map(h => String(h.hora).padStart(2, '0') + 'h'),
-        datasets: [{ label: 'Mensagens', data: horas.map(h => h.mensagens), backgroundColor: C.blue, borderRadius: 4, borderSkipped: 'bottom' }]
+        datasets: [{ label: 'Mensagens', data: horas.map(h => h.mensagens), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom' }]
       },
-      options: baseOpts({ scales: { x: { ticks: { maxTicksLimit: 24 } } } })
+      options: baseOpts({ scales: { x: xCat({ ticks: { maxTicksLimit: 24 } }) } })
     });
   }
 }
 
 /* ============================================================
-   PÁGINA 4 — Meta Ads
+   P4 · META ADS
+   Escopo: campanhas de tráfego (captação + e-commerce). O
+   impulsionamento tem página própria (Institucional).
    ============================================================ */
-/* Leads CRM por campanha no período: o ETL já atribui cada lead casado à
-   campanha real no campaign_daily (campo `leads`) — o front só agrega.
-   Regra de ouro 9: número vem do ETL, o front não re-deriva. */
-function crmLeadsByCampaign() {
-  const map = {};
-  let matched = 0;
-  fdays((DATA.meta_ads || {}).campaign_daily).forEach(r => {
-    if (r.leads) {
-      map[r.campanha] = (map[r.campanha] || 0) + r.leads;
-      matched += r.leads;
-    }
-  });
-  const pagos = sum(fdays(DATA.leads.daily), 'pagos');
-  return { map, unmatched: Math.max(0, pagos - matched) };
-}
-
-function renderMeta(el) {
+function renderMetaAds(el) {
   const meta = DATA.meta_ads || {};
-  const M = fdays(meta.daily);
-  const gasto = sum(M, 'gasto');
-  const imp = sum(M, 'impressoes');
-  const cli = sum(M, 'cliques');
+  const campDailyP = fdays(meta.campaign_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const captP = campDailyP.filter(r => tipoCampanha(r.campanha) === 'captacao');
+
+  const gasto = sum(campDailyP, 'gasto');
+  const imp = sum(campDailyP, 'impressoes');
+  const cli = sum(campDailyP, 'cliques');
   const ctr = imp > 0 ? cli / imp * 100 : null;
-  const conversas = sum(M, 'conversas');
-  const leadsPlat = sum(M, 'leads_plat');
-  const leadsCRM = sum(fdays(DATA.leads.daily), 'pagos');
-  const cplCRM = leadsCRM > 0 ? gasto / leadsCRM : null;
-  const matching = meta.matching || {};
-  const cplTargetMsg = (DATA.config && DATA.config.cpl_target_meta === 0) ? 'meta de CPL não definida' : 'gasto ÷ leads CRM';
+  const cpc = cli > 0 ? gasto / cli : null;
+  const leadsPlat = sum(campDailyP, 'leads_plat');
+  const gastoCapt = sum(captP, 'gasto');
+  // Numerador e denominador na MESMA frente: gasto de captação ÷ leads_plat
+  // das campanhas de captação (se o e-commerce um dia reportar leads_plat,
+  // ele não pode diluir o custo/lead da captação).
+  const leadsPlatCapt = sum(captP, 'leads_plat');
+  const custoLeadPlat = leadsPlatCapt > 0 ? gastoCapt / leadsPlatCapt : null;
+  const target = (DATA.config && DATA.config.cpl_target_meta) || 0;
 
-  let html = '<h2 class="page-title">Meta Ads</h2>' +
-    '<p class="page-sub">Período: ' + periodLabel() + ' · CPL sempre com leads do CRM — números da plataforma são referência.</p>';
+  // split do período (todas as campanhas, para o banner azul)
+  const splitP = { captacao: 0, ecommerce: 0, impulsionamento: 0, outras: 0 };
+  fdays(meta.campaign_daily).forEach(r => { splitP[tipoCampanha(r.campanha)] += r.gasto || 0; });
 
-  html += '<div class="kpis">' +
-    kpi('Investimento', fmt.currency(gasto), 'no período') +
-    kpi('Impressões', fmt.num(imp)) +
-    kpi('Cliques', fmt.num(cli)) +
-    kpi('CTR', ctr == null ? '—' : fmt.pct(ctr, 2)) +
-    kpi('Conversas iniciadas', fmt.num(conversas), 'plataforma') +
-    kpi('Leads plataforma', fmt.num(leadsPlat), 'referência — não é CRM') +
-    kpi('Leads CRM', fmt.num(leadsCRM), 'fonte de verdade', 'good') +
-    kpi('CPL CRM', cplCRM == null ? '—' : fmt.currency(cplCRM),
-      cplCRM == null ? 'sem leads CRM no período' : cplTargetMsg) +
+  let html = qualityBanners(false);
+  html += banner('blue', 'Esta página cobre as campanhas de <strong>tráfego</strong> (captação de leads + e-commerce). ' +
+    'No período: captação <strong>' + fmt.currency(splitP.captacao) + '</strong> · e-commerce <strong>' + fmt.currency(splitP.ecommerce) + '</strong>. ' +
+    'O impulsionamento (' + fmt.currency(splitP.impulsionamento) + ') tem página própria — Institucional &amp; Impulsionamento.');
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Gasto', fmt.currency(gasto), 'no período') +
+    kpi('Impressões', fmt.num(imp), 'no período') +
+    kpi('Cliques', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
+    kpi('CPC', cpc == null ? null : fmt.currency(cpc), 'gasto ÷ cliques') +
+    kpi('Leads plataforma', fmt.num(leadsPlat), 'plataforma (referência)') +
+    kpi('Custo/lead plat.', custoLeadPlat == null ? null : fmt.currency(custoLeadPlat),
+      (custoLeadPlat == null ? 'sem leads de plataforma na captação no período · ' : 'gasto de captação ÷ leads plat. da captação · ') +
+      (target ? 'meta: até ' + fmt.currency(target) : 'meta de CPL não definida'), { teal: true }) +
     '</div>';
 
-  if (matching.nivel) {
-    html += '<div class="banner warn"><strong>Matching anúncio ↔ CRM no nível de ' + esc(matching.nivel) + '.</strong> ' +
-      'O utm_content chega com o nome padrão do conjunto, então o lead do CRM só é atribuível à campanha — não a conjunto ou criativo. ' +
-      'Cobertura do matching: <strong>' + fmt.pct(matching.cobertura_pct, 0) + '</strong> (' +
-      fmt.num(matching.matched) + ' de ' + fmt.num(matching.leads_pagos_meta) + ' leads pagos casados via utm_campaign).</div>';
-  }
-
-  // gráfico gasto/dia × leads CRM/dia
-  const sGasto = dailySeries(meta.daily, ['gasto']);
-  const sLeads = dailySeries(DATA.leads.daily, ['pagos']);
-  html += (sGasto
-    ? chartCard('Investimento por dia × Leads CRM por dia', 'ch-meta-daily', TAG_TRUTH,
-      'Barras = gasto (eixo esquerdo, R$); linha = leads pagos do CRM (eixo direito). Dias fora da cobertura do CRM ficam sem linha (não é zero).')
-    : card('Investimento por dia × Leads CRM por dia', emptyBox()));
-
-  // ----- tabela CAMPANHAS (campaign_daily agregado no período) -----
+  // ----- Tabela CAMPANHAS -----
   const statusDict = meta.campaign_status || {};
-  const byCamp = {};
-  fdays(meta.campaign_daily).forEach(r => {
-    const k = r.campanha;
-    if (!byCamp[k]) byCamp[k] = { gasto: 0, impressoes: 0, cliques: 0, conversas: 0, leads_plat: 0 };
-    byCamp[k].gasto += r.gasto || 0;
-    byCamp[k].impressoes += r.impressoes || 0;
-    byCamp[k].cliques += r.cliques || 0;
-    byCamp[k].conversas += r.conversas || 0;
-    byCamp[k].leads_plat += r.leads_plat || 0;
-  });
-  const crmMatch = crmLeadsByCampaign();
-  Object.keys(crmMatch.map).forEach(c => {
-    if (!byCamp[c]) byCamp[c] = { gasto: 0, impressoes: 0, cliques: 0, conversas: 0, leads_plat: 0 };
-  });
-  let anyStatusMissing = false;
-  const campRows = Object.entries(byCamp)
-    .map(([nome, v]) => {
-      const lcrm = crmMatch.map[nome] || 0;
-      return { nome, v, lcrm, cpl: lcrm > 0 ? v.gasto / lcrm : null };
-    })
-    .filter(r => r.v.gasto > 0 || r.lcrm > 0)
+  const byCamp = aggBy(campDailyP, r => r.campanha, ['gasto', 'impressoes', 'cliques', 'leads_plat']);
+  const campRows = Object.keys(byCamp)
+    .map(k => ({ nome: k, v: byCamp[k] }))
+    .filter(r => r.v.gasto > 0 || r.v.leads_plat > 0)
     .sort((a, b) => b.v.gasto - a.v.gasto);
-
   const campBody = campRows.map(r => {
-    const st = statusDict[r.nome];
-    let stHtml;
-    if (st === 'ACTIVE') stHtml = '<span class="badge active">ACTIVE</span>';
-    else if (st === 'PAUSED') stHtml = '<span class="badge paused">PAUSED</span>';
-    else if (st) stHtml = '<span class="badge paused">' + esc(st) + '</span>';
-    else { anyStatusMissing = true; stHtml = '<span class="badge unknown" title="status indisponível — não inferimos">—</span>'; }
-    const ictr = r.v.impressoes > 0 ? r.v.cliques / r.v.impressoes * 100 : null;
-    return '<tr><td>' + stHtml + '</td><td class="name">' + esc(r.nome) + '</td>' +
-      '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
-      '<td class="r">' + fmt.num(r.v.impressoes) + '</td>' +
-      '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
-      '<td class="r">' + (ictr == null ? '—' : fmt.pct(ictr, 2)) + '</td>' +
-      '<td class="r">' + fmt.num(r.v.conversas) + '</td>' +
-      '<td class="r">' + fmt.num(r.v.leads_plat) + '</td>' +
-      '<td class="r">' + (r.lcrm > 0 ? fmt.num(r.lcrm) : '—') + '</td>' +
-      '<td class="r">' + (r.cpl == null ? '—' : fmt.currency(r.cpl)) + '</td></tr>';
+    const v = r.v;
+    const rctr = v.impressoes > 0 ? v.cliques / v.impressoes * 100 : null;
+    const rcpc = v.cliques > 0 ? v.gasto / v.cliques : null;
+    const rcl = v.leads_plat > 0 ? v.gasto / v.leads_plat : null;
+    return '<tr><td>' + statusBadge(statusDict[r.nome]) + '</td>' +
+      '<td class="name">' + esc(r.nome) + '</td>' +
+      '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(v.impressoes) + '</td>' +
+      '<td class="r">' + fmt.num(v.cliques) + '</td>' +
+      '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
+      '<td class="r">' + (rcpc == null ? '—' : fmt.currency(rcpc)) + '</td>' +
+      '<td class="r">' + fmt.num(v.leads_plat) + '</td>' +
+      '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td></tr>';
   }).join('');
+  html += card('Campanhas', 'status real via API · métricas do período filtrado',
+    campBody
+      ? tableWrap([
+        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'CTR', r: 1 }, { t: 'CPC', r: 1 }, { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }
+      ], campBody)
+      : emptyDashed('Nenhuma campanha de tráfego com gasto no período.', 'Ajuste o filtro de período no topo.'));
 
-  let campNotes = '<div class="note">Leads CRM atribuídos no nível de campanha via utm_campaign (ver banner acima). "—" = nenhum lead do CRM casado com a campanha no período.</div>';
-  if (anyStatusMissing) campNotes += '<div class="note">Campanhas com status "—": status indisponível na API — o painel não infere se está ativa.</div>';
-  if (crmMatch.unmatched > 0) campNotes += '<div class="note">' + fmt.num(crmMatch.unmatched) + ' lead(s) pago(s) do CRM no período sem campanha atribuída pelo matching — a soma da tabela é menor que o KPI de propósito (decomposição ≤ KPI).</div>';
-  if (DATA.config && DATA.config.cpl_target_meta === 0) campNotes += '<div class="note">Meta de CPL não definida — sem régua verde/vermelha nas campanhas.</div>';
-
-  html += card('Campanhas (agregado do período)',
-    campRows.length
-      ? '<div class="table-wrap"><table><thead><tr><th>Status</th><th>Campanha</th><th class="r">Gasto</th><th class="r">Impressões</th><th class="r">Cliques</th><th class="r">CTR</th><th class="r">Conversas</th><th class="r">Leads plat.</th><th class="r">Leads CRM</th><th class="r">CPL CRM</th></tr></thead><tbody>' +
-      campBody + '</tbody></table></div>' + campNotes
-      : emptyBox());
-
-  // ----- tabela CONJUNTOS (adset_daily; chave composta campanha|||conjunto) -----
-  const byAdset = {};
-  fdays(meta.adset_daily).forEach(r => {
-    const k = r.campanha + '|||' + r.conjunto;
-    if (!byAdset[k]) byAdset[k] = { campanha: r.campanha, conjunto: r.conjunto, gasto: 0, cliques: 0, conversas: 0, leads_plat: 0 };
-    byAdset[k].gasto += r.gasto || 0;
-    byAdset[k].cliques += r.cliques || 0;
-    byAdset[k].conversas += r.conversas || 0;
-    byAdset[k].leads_plat += r.leads_plat || 0;
-  });
-  const adsetRows = Object.values(byAdset).filter(r => r.gasto > 0).sort((a, b) => b.gasto - a.gasto);
-  const adsetBody = adsetRows.map(r =>
-    '<tr><td class="name">' + esc(r.conjunto) + '</td><td class="name">' + esc(r.campanha) + '</td>' +
-    '<td class="r">' + fmt.currency(r.gasto) + '</td>' +
-    '<td class="r">' + fmt.num(r.cliques) + '</td>' +
-    '<td class="r">' + fmt.num(r.conversas) + '</td>' +
-    '<td class="r">' + fmt.num(r.leads_plat) + '</td></tr>').join('');
-
-  html += card('Conjuntos de anúncio (agregado do período)',
-    adsetRows.length
-      ? '<div class="table-wrap"><table><thead><tr><th>Conjunto</th><th>Campanha</th><th class="r">Gasto</th><th class="r">Cliques</th><th class="r">Conversas</th><th class="r">Leads plat.</th></tr></thead><tbody>' +
-      adsetBody + '</tbody></table></div>' +
-      '<div class="note">Sem coluna de Leads CRM: atribuição por conjunto indisponível — o utm_content chega com o nome padrão do conjunto ("Novo conjunto de anúncios de Leads"), não com o anúncio. Parametrizar utm_content={{ad.name}} resolve.</div>'
-      : emptyBox());
-
-  // ----- tabela CRIATIVOS (creatives × creatives_daily p/ respeitar o período) -----
-  const metaCreat = {};
-  (meta.creatives || []).forEach(c => { metaCreat[c.anuncio + '|||' + c.campanha] = c; });
-  const byCreat = {};
-  fdays(meta.creatives_daily).forEach(r => {
-    const k = r.anuncio + '|||' + r.campanha;
-    if (!byCreat[k]) byCreat[k] = { anuncio: r.anuncio, campanha: r.campanha, gasto: 0, cliques: 0, conversas: 0, leads_plat: 0 };
-    byCreat[k].gasto += r.gasto || 0;
-    byCreat[k].cliques += r.cliques || 0;
-    byCreat[k].conversas += r.conversas || 0;
-    byCreat[k].leads_plat += r.leads_plat || 0;
-  });
-  const creatRows = Object.entries(byCreat)
-    .map(([k, v]) => ({ k, v, agg: metaCreat[k] }))
+  // ----- Tabela CONJUNTOS -----
+  const adsetP = fdays(meta.adset_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const byAdset = aggBy(adsetP, r => r.campanha + '|||' + r.conjunto, ['gasto', 'cliques', 'leads_plat']);
+  const adsetRows = Object.keys(byAdset)
+    .map(k => ({ campanha: byAdset[k].__row.campanha, conjunto: byAdset[k].__row.conjunto, v: byAdset[k] }))
     .filter(r => r.v.gasto > 0)
     .sort((a, b) => b.v.gasto - a.v.gasto);
+  const adsetBody = adsetRows.map(r => {
+    const rcl = r.v.leads_plat > 0 ? r.v.gasto / r.v.leads_plat : null;
+    return '<tr><td class="name">' + esc(r.conjunto) + '</td>' +
+      '<td class="dim">' + esc(r.campanha) + '</td>' +
+      '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
+      '<td class="r">—</td>' +
+      '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
+      '<td class="r">' + fmt.num(r.v.leads_plat) + '</td>' +
+      '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td>' +
+      '<td>' + qualityBadge(rcl, r.v.leads_plat) + '</td></tr>';
+  }).join('');
+  html += card('Conjuntos de anúncios', 'agrupado por campanha + conjunto (dimensão real da linha da API)',
+    adsetBody
+      ? tableWrap([
+        { t: 'Conjunto' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }, { t: 'Qualidade' }
+      ], adsetBody) +
+      '<div class="note">Impressões por conjunto ainda não são exportadas pelo ETL — coluna fica "—". ' +
+      'A régua Bom/Ruim é habilitada quando a meta de custo/lead for definida na configuração.</div>'
+      : emptyDashed('Nenhum conjunto com gasto no período.'));
 
-  const creatBody = creatRows.map(r => {
-    const agg = r.agg || {};
-    const thumb = agg.thumbnail
-      ? '<img class="thumb" src="' + esc(agg.thumbnail) + '" alt="" loading="lazy" referrerpolicy="no-referrer" ' +
-      'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">' +
-      '<div class="thumb-fb">▦</div>'
+  // ----- Tabela ANÚNCIOS -----
+  const metaCreat = {};
+  (meta.creatives || []).forEach(c => { metaCreat[c.anuncio + '|||' + c.campanha] = c; });
+  const creatP = fdays(meta.creatives_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const byCreat = aggBy(creatP, r => r.anuncio + '|||' + r.campanha, ['gasto', 'cliques', 'leads_plat']);
+  const ADS_CAP = 25;
+  const creatRows = Object.keys(byCreat)
+    .map(k => ({ k, v: byCreat[k], agg: metaCreat[k] || {} }))
+    .filter(r => r.v.gasto > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto);
+  const creatBody = creatRows.slice(0, ADS_CAP).map(r => {
+    const a = r.agg;
+    const anuncio = r.v.__row.anuncio;
+    const rcl = r.v.leads_plat > 0 ? r.v.gasto / r.v.leads_plat : null;
+    const thumb = a.thumbnail
+      ? '<img class="thumb" src="' + esc(a.thumbnail) + '" alt="" loading="lazy" referrerpolicy="no-referrer" ' +
+      'onerror="this.style.display=&#39;none&#39;;this.nextElementSibling.style.display=&#39;flex&#39;"><div class="thumb-fb">▦</div>'
       : '<div class="thumb-fb" style="display:flex">▦</div>';
-    const link = agg.permalink ? '<a href="' + esc(agg.permalink) + '" target="_blank" rel="noopener">ver post</a>' : '—';
-    return '<tr><td><div class="cell-creative">' + thumb + '<span class="name">' + esc(r.v.anuncio) + '</span></div></td>' +
-      '<td class="name">' + esc(r.v.campanha) + '</td>' +
+    const nome = a.permalink
+      ? '<a href="' + esc(a.permalink) + '" target="_blank" rel="noopener">' + esc(anuncio) + ' 🔗</a>'
+      : '<span class="name">' + esc(anuncio || '(sem nome)') + '</span>';
+    return '<tr><td><div class="cell-creative">' + thumb + nome + '</div></td>' +
+      '<td class="dim">' + esc(a.conjunto || '—') + '</td>' +
       '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
       '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
-      '<td class="r">' + (agg.ctr != null ? fmt.pct(agg.ctr, 2) : '—') + '</td>' +
-      '<td class="r">' + fmt.num(r.v.conversas) + '</td>' +
       '<td class="r">' + fmt.num(r.v.leads_plat) + '</td>' +
-      '<td>' + link + '</td></tr>';
+      '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td>' +
+      '<td>' + qualityBadge(rcl, r.v.leads_plat) + '</td></tr>';
   }).join('');
+  html += card('Anúncios', 'criativo × campanha × conjunto · clique no nome para ver o anúncio',
+    creatBody
+      ? tableWrap([
+        { t: 'Anúncio' }, { t: 'Conjunto' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }, { t: 'Qualidade' }
+      ], creatBody) +
+      (creatRows.length > ADS_CAP
+        ? '<div class="note">Mostrando os ' + ADS_CAP + ' anúncios com maior gasto de ' + fmt.num(creatRows.length) + ' no período.</div>'
+        : '')
+      : emptyDashed('Nenhum anúncio com gasto no período.'));
 
-  html += card('Criativos (agregado do período)',
-    creatRows.length
-      ? '<div class="table-wrap"><table><thead><tr><th>Anúncio</th><th>Campanha</th><th class="r">Gasto</th><th class="r">Cliques</th><th class="r">CTR*</th><th class="r">Conversas</th><th class="r">Leads plat.</th><th>Link</th></tr></thead><tbody>' +
-      creatBody + '</tbody></table></div>' +
-      '<div class="note">*CTR do histórico completo do criativo — impressões diárias por criativo não estão disponíveis, então o CTR não respeita o filtro de período (as demais colunas respeitam).</div>' +
-      '<div class="note">Sem Leads CRM por criativo pelo mesmo motivo do conjunto (utm_content com nome padrão).</div>'
-      : emptyBox());
+  // ----- Combo mensal: Investimento × Leads CRM -----
+  const trafDaily = (meta.campaign_daily || []).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const gastoMes = {};
+  trafDaily.forEach(r => { const m = (r.dia || '').slice(0, 7); if (m) gastoMes[m] = (gastoMes[m] || 0) + (r.gasto || 0); });
+  const leadsMes = {};
+  ((DATA.leads || {}).monthly || []).forEach(r => { leadsMes[r.mes] = r.total; });
+  const mesesCombo = Array.from(new Set(Object.keys(gastoMes).concat(Object.keys(leadsMes)))).sort();
+  html += (mesesCombo.length
+    ? chartCard('Investimento × Leads CRM (mensal)',
+      'barras = gasto Meta (tráfego, sem impulsionamento) · linha = leads do pipeline no CRM · série mensal completa — não usa o filtro',
+      'ch-meta-mensal', 'tall')
+    : card('Investimento × Leads CRM (mensal)', '', emptyDashed('Sem série mensal ainda.')));
 
   el.innerHTML = html;
 
-  if (sGasto) {
-    // leads CRM alinhados ao eixo do gasto; fora da cobertura do CRM => null (buraco honesto)
-    const leadsIdx = {};
-    let lMin = null, lMax = null;
-    if (sLeads) {
-      sLeads.days.forEach((d, i) => { leadsIdx[d] = sLeads.data.pagos[i]; });
-      lMin = sLeads.days[0]; lMax = sLeads.days[sLeads.days.length - 1];
-    }
-    const leadLine = sGasto.days.map(d =>
-      (lMin && d >= lMin && d <= lMax) ? (leadsIdx[d] || 0) : null);
-    makeChart('ch-meta-daily', {
+  if (mesesCombo.length) {
+    makeChart('ch-meta-mensal', {
       type: 'bar',
       data: {
-        labels: sGasto.labels,
+        labels: mesesCombo.map(mesLabel),
         datasets: [
-          { type: 'bar', label: 'Gasto (R$)', data: sGasto.data.gasto, backgroundColor: C.green, borderRadius: 4, borderSkipped: 'bottom', yAxisID: 'y', order: 2 },
-          { type: 'line', label: 'Leads CRM (pagos)', data: leadLine, borderColor: C.blue, backgroundColor: C.blue, borderWidth: 2, pointRadius: 2, tension: .3, spanGaps: false, yAxisID: 'y1', order: 1 }
+          { type: 'bar', label: 'Gasto (R$)', data: mesesCombo.map(m => gastoMes[m] || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', yAxisID: 'y', order: 2 },
+          { type: 'line', label: 'Leads CRM', data: mesesCombo.map(m => leadsMes[m] != null ? leadsMes[m] : null), borderColor: P.teal, backgroundColor: P.teal, borderWidth: 2, pointRadius: 4, tension: .3, spanGaps: false, yAxisID: 'y1', order: 1 }
         ]
       },
       options: baseOpts({
         plugins: {
-          legend: { display: true, position: 'bottom' },
+          legend: legendTop(),
           tooltip: {
             callbacks: {
               label: ctx => ctx.dataset.yAxisID === 'y'
@@ -846,8 +961,9 @@ function renderMeta(el) {
           }
         },
         scales: {
-          y: { position: 'left', title: { display: true, text: 'R$' }, ticks: moneyTicks() },
-          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { precision: 0 }, title: { display: true, text: 'Leads CRM' } }
+          x: xCat(),
+          y: yMoney({ position: 'left' }),
+          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: P.teal, precision: 0 } }
         }
       })
     });
@@ -855,80 +971,423 @@ function renderMeta(el) {
 }
 
 /* ============================================================
-   PÁGINA 5 — Google Ads
+   P5 · GOOGLE ADS (integração pendente — estado vazio da spec)
    ============================================================ */
-function renderGoogle(el) {
+function renderGoogleAds(el) {
   const g = DATA.google_ads || {};
-  let html = '<h2 class="page-title">Google Ads</h2>';
-  if (g.disponivel === false) {
-    html += '<div class="card"><div class="empty-state">' +
-      '<div class="icon">🔌</div>' +
-      '<h3>Integração ainda não conectada</h3>' +
-      '<p>' + esc(g.motivo || 'Aguardando credenciais do Google Ads.') + '</p>' +
-      '<p>Conta do cliente: <strong>Terrana — 223-460-7566</strong>.</p>' +
-      '<ul class="checklist">' +
-      '<li>Criar o OAuth Client (Google Cloud Console) da agência</li>' +
-      '<li>Gerar o refresh token com acesso à conta 223-460-7566</li>' +
-      '<li>Rodar o ETL — a página passa a espelhar o layout do Meta Ads automaticamente</li>' +
-      '</ul>' +
-      '</div></div>';
-    // TODO: quando google_ads.disponivel === true, replicar aqui o layout da página
-    // Meta Ads (KPIs de período, banner de matching, gasto × leads CRM por dia,
-    // tabelas de campanhas / grupos de anúncio / criativos) usando as chaves
-    // google_ads.daily / campaign_daily / etc. que o ETL passar a publicar.
+  let html = qualityBanners(false);
+
+  if (g.disponivel === false || !g.daily) {
+    html += '<div class="kpis cols-6">' +
+      kpi('Gasto', null, 'no período') +
+      kpi('Impressões', null, '') +
+      kpi('Cliques', null, '') +
+      kpi('CPC', null, '') +
+      kpi('Conversões', null, 'plataforma (referência)') +
+      kpi('Custo/conversão', null, '', { teal: true }) +
+      '</div>';
+    html += card('Google Ads', 'status real via API',
+      emptyDashed('Integração Google Ads ainda não conectada.',
+        esc(g.motivo || 'Aguardando credenciais do Google Ads.') +
+        ' Quando o ETL passar a publicar os dados, esta página espelha o layout do Meta Ads automaticamente.'));
   } else {
-    html += '<div class="banner warn"><strong>Dados do Google Ads recebidos, mas esta página ainda não foi construída.</strong> O layout espelha o Meta Ads — pendência de implementação no front.</div>';
+    html += banner('amber', '<strong>Dados do Google Ads recebidos, mas esta página ainda não foi construída.</strong> O layout espelha o Meta Ads — pendência de implementação no front.');
   }
   el.innerHTML = html;
 }
 
 /* ============================================================
-   PÁGINA 6 — Rastreamento (UTM)
+   P6 · INSTITUCIONAL & IMPULSIONAMENTO
+   ============================================================ */
+function renderInstitucional(el) {
+  const inst = DATA.institucional || {};
+  const IM = (inst.monthly || []).filter(r => monthInPeriod(r.mes));
+  const gasto = sum(IM, 'gasto');
+  const imp = sum(IM, 'impressoes');
+  const eng = sum(IM, 'engajamento');
+  const views = sum(IM, 'video_views');
+  const cpm = imp > 0 ? gasto / imp * 1000 : null;
+  const cpe = eng > 0 ? gasto / eng : null;
+  const hasPeriod = IM.length > 0;
+
+  let html = qualityBanners(false);
+  html += banner('blue', 'As campanhas de impulsionamento são da <strong>conta inteira</strong> do Instagram/Facebook — não são específicas da frente B2B. ' +
+    'Dados com granularidade <strong>mensal</strong>: o filtro de período considera os meses selecionados inteiros. ' +
+    'Sem métrica de alcance de propósito: <strong>alcance não é aditivo</strong> (somar alcances diários infla o número) — usamos impressões.');
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Investimento', hasPeriod ? fmt.currency(gasto) : null, 'impulsionamento nos meses do período') +
+    kpi('Impressões', hasPeriod ? fmt.num(imp) : null, 'soma dos meses do período') +
+    kpi('Engajamento', hasPeriod ? fmt.num(eng) : null, 'interações com posts') +
+    kpi('Views de vídeo', hasPeriod ? fmt.num(views) : null, 'nos meses do período') +
+    kpi('Custo / 1.000 impressões', cpm == null ? null : fmt.currency(cpm), 'no lugar de custo/alcance (alcance não é aditivo)', { teal: true }) +
+    kpi('Custo / engajamento', cpe == null ? null : fmt.currency(cpe), 'gasto ÷ interações', { teal: true }) +
+    '</div>';
+
+  // split de gasto (toda a série)
+  const split = inst.split_gasto || {};
+  const splitPairs = [
+    ['Captação (leads B2B)', split.captacao || 0, P.teal],
+    ['E-commerce', split.ecommerce || 0, P.blue],
+    ['Impulsionamento', split.impulsionamento || 0, P.amber]
+  ].concat(split.outras ? [['Outras', split.outras, P.muted]] : []);
+
+  html += '<div class="grid-2">' +
+    chartCard('Divisão do investimento Meta', 'conta inteira, classificada pelo nome da campanha · toda a série — não usa o filtro', 'ch-inst-split') +
+    (IM.length
+      ? chartCard('Investimento × Engajamento (mensal)', 'barras = gasto impulsionamento · linha = engajamento', 'ch-inst-mensal')
+      : card('Investimento × Engajamento (mensal)', '', emptyDashed('Sem meses de impulsionamento no período selecionado.', 'Amplie o período no topo.'))) +
+    '</div>';
+
+  // tabela campanhas institucionais (totais da série — sem fonte diária)
+  const rows = (inst.campaigns || []).slice().sort((a, b) => (b.gasto || 0) - (a.gasto || 0)).map(c => {
+    const rcpe = (c.engajamento || 0) > 0 ? (c.gasto || 0) / c.engajamento : null;
+    return '<tr><td>' + statusBadge(c.status) + '</td>' +
+      '<td class="name">' + esc(c.campanha) + '</td>' +
+      '<td class="r">' + fmt.currency(c.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(c.impressoes) + '</td>' +
+      '<td class="r">' + fmt.num(c.engajamento) + '</td>' +
+      '<td class="r">' + fmt.num(c.video_views) + '</td>' +
+      '<td class="r">' + (rcpe == null ? '—' : fmt.currency(rcpe)) + '</td></tr>';
+  }).join('');
+  html += card('Campanhas institucionais',
+    'status real via API · totais de toda a série (a API não expõe o diário por campanha de impulsionamento no resumo atual) — <strong>não usa o filtro de período</strong>',
+    rows
+      ? tableWrap([
+        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
+        { t: 'Engajamento', r: 1 }, { t: 'Views', r: 1 }, { t: 'Custo/engaj.', r: 1 }
+      ], rows)
+      : emptyDashed('Nenhuma campanha de impulsionamento registrada.'));
+
+  el.innerHTML = html;
+
+  makeChart('ch-inst-split', {
+    type: 'doughnut',
+    data: {
+      labels: splitPairs.map(p2 => p2[0]),
+      datasets: [{
+        data: splitPairs.map(p2 => p2[1]),
+        backgroundColor: splitPairs.map(p2 => p2[2]),
+        borderColor: '#ffffff',
+        borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      cutout: '62%',
+      plugins: {
+        legend: { display: true, position: 'right', labels: { boxWidth: 14, boxHeight: 14, color: P.soft, padding: 10 } },
+        tooltip: { callbacks: { label: ctx => ctx.label + ': ' + fmt.currency(ctx.parsed) } }
+      }
+    }
+  });
+
+  if (IM.length) {
+    makeChart('ch-inst-mensal', {
+      type: 'bar',
+      data: {
+        labels: IM.map(r => mesLabel(r.mes)),
+        datasets: [
+          { type: 'bar', label: 'Gasto (R$)', data: IM.map(r => r.gasto || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', yAxisID: 'y', order: 2 },
+          { type: 'line', label: 'Engajamento', data: IM.map(r => r.engajamento || 0), borderColor: P.teal, backgroundColor: P.teal, borderWidth: 2, pointRadius: 4, tension: .3, yAxisID: 'y1', order: 1 }
+        ]
+      },
+      options: baseOpts({
+        plugins: {
+          legend: legendTop(),
+          tooltip: {
+            callbacks: {
+              label: ctx => ctx.dataset.yAxisID === 'y'
+                ? ctx.dataset.label + ': ' + fmt.currency(ctx.parsed.y)
+                : ctx.dataset.label + ': ' + fmt.num(ctx.parsed.y)
+            }
+          }
+        },
+        scales: {
+          x: xCat(),
+          y: yMoney({ position: 'left' }),
+          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: P.teal, callback: v => Number(v).toLocaleString('pt-BR') } }
+        }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   P7 · PÚBLICO (breakdowns mensais da Meta)
+   ============================================================ */
+function stackByAgeGender(rows, field) {
+  const ages = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+', 'Unknown'];
+  const g = { female: {}, male: {}, unknown: {} };
+  let total = 0;
+  (rows || []).forEach(r => {
+    if (!monthInPeriod(r.mes)) return;
+    const gg = g[r.genero] || g.unknown;
+    gg[r.idade] = (gg[r.idade] || 0) + (r[field] || 0);
+    total += r[field] || 0;
+  });
+  return {
+    ages, total,
+    fem: ages.map(a => g.female[a] || 0),
+    mas: ages.map(a => g.male[a] || 0),
+    unk: ages.map(a => g.unknown[a] || 0)
+  };
+}
+function renderPublico(el) {
+  const pub = DATA.publico || {};
+  let html = qualityBanners(false);
+  html += banner('blue', 'Dados da Meta com granularidade <strong>mensal</strong> — o filtro de período considera os <strong>meses selecionados inteiros</strong>. Conta inteira (todas as campanhas Meta).');
+
+  const inv = stackByAgeGender(pub.age_gender, 'gasto');
+  const lds = stackByAgeGender(pub.age_gender, 'leads_plat');
+
+  // posicionamentos
+  const placM = (pub.placement || []).filter(r => monthInPeriod(r.mes));
+  const byPlace = aggBy(placM, r => (r.plataforma || '?') + ' · ' + (r.posicao || '?'), ['gasto', 'impressoes', 'cliques', 'leads_plat']);
+  const placeRows = Object.keys(byPlace)
+    .map(k => ({ k, v: byPlace[k] }))
+    .filter(r => r.v.gasto > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto)
+    .map(r => {
+      const rctr = r.v.impressoes > 0 ? r.v.cliques / r.v.impressoes * 100 : null;
+      return '<tr><td class="name" style="text-transform:lowercase">' + esc(r.k) + '</td>' +
+        '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
+        '<td class="r">' + fmt.num(r.v.impressoes) + '</td>' +
+        '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
+        '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
+        '<td class="r">' + fmt.num(r.v.leads_plat) + '</td></tr>';
+    }).join('');
+
+  // regiões
+  const regM = (pub.region || []).filter(r => monthInPeriod(r.mes));
+  const byReg = aggBy(regM, r => (r.regiao || '(sem região)').replace(' (state)', ''), ['gasto']);
+  const topReg = Object.keys(byReg)
+    .map(k => ({ k, gasto: byReg[k].gasto }))
+    .sort((a, b) => b.gasto - a.gasto)
+    .slice(0, 12);
+
+  html += '<div class="grid-2">' +
+    (inv.total > 0
+      ? chartCard('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', 'ch-pub-inv')
+      : card('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', emptyDashed('Sem dados de público nos meses do período.', 'Amplie o período no topo.'))) +
+    (lds.total > 0
+      ? chartCard('Leads Plataforma por idade e gênero', 'quem responde aos anúncios (número da plataforma — referência)', 'ch-pub-leads')
+      : card('Leads Plataforma por idade e gênero', 'quem responde aos anúncios', emptyDashed('Sem leads de plataforma nos meses do período.', 'A campanha de captação começou em 26/06 — amplie o período.'))) +
+    '</div>';
+
+  html += '<div class="grid-2">' +
+    card('Posicionamentos', 'feed, stories, reels — onde os anúncios rodam',
+      placeRows
+        ? tableWrap([
+          { t: 'Posicionamento' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
+          { t: 'Cliques', r: 1 }, { t: 'CTR', r: 1 }, { t: 'Leads plataforma', r: 1 }
+        ], placeRows)
+        : emptyDashed('Sem dados de posicionamento nos meses do período.')) +
+    (topReg.length
+      ? chartCard('Regiões', 'top 12 por investimento', 'ch-pub-reg', 'tall')
+      : card('Regiões', 'top 12 por investimento', emptyDashed('Sem dados de região nos meses do período.'))) +
+    '</div>';
+
+  el.innerHTML = html;
+
+  // Spec P7: eixo monetário com milhar pt-BR ("1.200"), sem prefixo R$ —
+  // formato específico desta página (o tooltip continua em R$).
+  const milharTick = v => Number(v).toLocaleString('pt-BR');
+  const stackedOpts = moneyAxis => baseOpts({
+    plugins: deepMerge({ legend: legendTop() }, moneyAxis ? { tooltip: { callbacks: moneyTooltip() } } : {}),
+    scales: {
+      x: xCat({ stacked: true, grid: { color: P.grid, display: true, drawTicks: false } }),
+      y: moneyAxis ? yCount({ stacked: true, ticks: { callback: milharTick } }) : yCount({ stacked: true })
+    }
+  });
+  const genderSets = d => [
+    { label: 'Feminino', data: d.fem, backgroundColor: P.teal, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' },
+    { label: 'Masculino', data: d.mas, backgroundColor: P.blue, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' },
+    { label: 'Não informado', data: d.unk, backgroundColor: P.muted, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' }
+  ];
+  if (inv.total > 0) {
+    makeChart('ch-pub-inv', { type: 'bar', data: { labels: inv.ages, datasets: genderSets(inv) }, options: stackedOpts(true) });
+  }
+  if (lds.total > 0) {
+    makeChart('ch-pub-leads', { type: 'bar', data: { labels: lds.ages, datasets: genderSets(lds) }, options: stackedOpts(false) });
+  }
+  if (topReg.length) {
+    makeChart('ch-pub-reg', {
+      type: 'bar',
+      data: {
+        labels: topReg.map(r => r.k),
+        datasets: [{ label: 'Gasto (R$)', data: topReg.map(r => r.gasto), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'left' }]
+      },
+      options: baseOpts({
+        indexAxis: 'y',
+        plugins: { tooltip: { callbacks: moneyTooltip() } },
+        scales: {
+          x: yCount({ position: 'bottom', ticks: { maxRotation: 0, minRotation: 0, callback: milharTick } }),
+          y: { grid: { display: false }, ticks: { color: P.soft } }
+        }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   P8 · EVOLUÇÃO MENSAL
+   ============================================================ */
+function renderEvolucao(el) {
+  const leadsM = (DATA.leads || {}).monthly || [];
+  const metaM = (DATA.meta_ads || {}).monthly || [];
+  const wonM = {};
+  ((DATA.crm || {}).monthly_won || []).forEach(r => { wonM[r.mes] = r.ganhos; });
+  const lostM = {};
+  ((DATA.crm || {}).deals_minimal || []).forEach(d => {
+    if (!d.perdido) return;
+    const m = (d.criado_em || '').slice(0, 7);
+    if (m) lostM[m] = (lostM[m] || 0) + 1;
+  });
+  const mesesVP = Array.from(new Set(Object.keys(wonM).concat(Object.keys(lostM)))).sort();
+
+  // custo/lead plataforma por mês: gasto de captação ÷ leads_plat DA CAPTAÇÃO
+  // no mês (o mensal da conta inteira não pode diluir o denominador)
+  const captMes = {}, leadsPlatCaptMes = {};
+  ((DATA.meta_ads || {}).campaign_daily || []).forEach(r => {
+    if (tipoCampanha(r.campanha) !== 'captacao') return;
+    const m = (r.dia || '').slice(0, 7);
+    if (!m) return;
+    captMes[m] = (captMes[m] || 0) + (r.gasto || 0);
+    leadsPlatCaptMes[m] = (leadsPlatCaptMes[m] || 0) + (r.leads_plat || 0);
+  });
+  const cplM = metaM.map(r => (leadsPlatCaptMes[r.mes] > 0 && captMes[r.mes]) ? captMes[r.mes] / leadsPlatCaptMes[r.mes] : null);
+
+  let html = qualityBanners(false);
+  html += '<div class="note-blue">Visão mensal completa — <strong>não usa o filtro de período do topo</strong>. Vendas e perdas contadas pelo mês de criação do lead.</div>';
+
+  html += '<div class="grid-2">' +
+    (leadsM.length
+      ? chartCard('Leads por mês (CRM)', 'entradas no pipeline de venda B2B', 'ch-ev-leads')
+      : card('Leads por mês (CRM)', '', emptyDashed('Sem série mensal de leads ainda.'))) +
+    (metaM.length
+      ? chartCard('Investimento por mês (Meta)', 'conta Meta inteira (captação + e-commerce + impulsionamento)', 'ch-ev-invest')
+      : card('Investimento por mês (Meta)', '', emptyDashed('Sem série mensal de investimento ainda.'))) +
+    '</div>';
+
+  html += '<div class="grid-2">' +
+    (mesesVP.length
+      ? chartCard('Vendas × Perdas por mês', 'pelo mês de criação do lead (CRM — fonte de verdade)', 'ch-ev-vp')
+      : card('Vendas × Perdas por mês', '', emptyDashed('Nenhuma venda ou perda registrada ainda.'))) +
+    (metaM.length
+      ? chartCard('Custo/Lead Plat. por mês', 'gasto de captação ÷ leads reportados pela plataforma (referência)', 'ch-ev-cpl')
+      : card('Custo/Lead Plat. por mês', '', emptyDashed('Sem série mensal ainda.'))) +
+    '</div>';
+
+  el.innerHTML = html;
+
+  if (leadsM.length) {
+    makeChart('ch-ev-leads', {
+      type: 'bar',
+      data: {
+        labels: leadsM.map(r => mesLabel(r.mes)),
+        datasets: [{ label: 'Leads', data: leadsM.map(r => r.total || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', barPercentage: .65 }]
+      },
+      options: baseOpts({ scales: { x: xCat() } })
+    });
+  }
+  if (metaM.length) {
+    makeChart('ch-ev-invest', {
+      type: 'bar',
+      data: {
+        labels: metaM.map(r => mesLabel(r.mes)),
+        datasets: [{ label: 'Gasto (R$)', data: metaM.map(r => r.gasto || 0), backgroundColor: P.teal, borderRadius: 4, borderSkipped: 'bottom', barPercentage: .65 }]
+      },
+      options: baseOpts({
+        plugins: { tooltip: { callbacks: moneyTooltip() } },
+        scales: { x: xCat(), y: yMoney() }
+      })
+    });
+  }
+  if (mesesVP.length) {
+    makeChart('ch-ev-vp', {
+      type: 'bar',
+      data: {
+        labels: mesesVP.map(mesLabel),
+        datasets: [
+          { label: 'Vendas', data: mesesVP.map(m => wonM[m] || 0), backgroundColor: P.green, borderRadius: 4, borderSkipped: 'bottom' },
+          { label: 'Perdas', data: mesesVP.map(m => lostM[m] || 0), backgroundColor: P.red, borderRadius: 4, borderSkipped: 'bottom' }
+        ]
+      },
+      options: baseOpts({
+        plugins: { legend: legendTop() },
+        scales: { x: xCat() }
+      })
+    });
+  }
+  if (metaM.length) {
+    makeChart('ch-ev-cpl', {
+      type: 'line',
+      data: {
+        labels: metaM.map(r => mesLabel(r.mes)),
+        datasets: [{
+          label: 'Custo/lead plat.', data: cplM,
+          borderColor: P.amber, backgroundColor: P.amber,
+          borderWidth: 2, pointRadius: 5, tension: .3, spanGaps: false
+        }]
+      },
+      options: baseOpts({
+        plugins: {
+          tooltip: {
+            callbacks: { label: ctx => ctx.parsed.y == null ? 'sem leads de plataforma no mês' : 'Custo/lead plat.: ' + fmt.currency(ctx.parsed.y) }
+          }
+        },
+        scales: { x: xCat(), y: yMoney() }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   P9 · RASTREAMENTO (UTM) — página extra da Terrana
    ============================================================ */
 function renderUTM(el) {
   const utm = DATA.utm || {};
   const cob = utm.cobertura || { total: 0, com_utm: 0, pct: 0 };
 
   const listTable = (rows, colName) => rows && rows.length
-    ? '<div class="table-wrap"><table><thead><tr><th>' + colName + '</th><th class="r">Leads</th></tr></thead><tbody>' +
-    rows.map(r => '<tr><td class="name">' + esc(r.valor) + '</td><td class="r">' + fmt.num(r.leads) + '</td></tr>').join('') +
-    '</tbody></table></div>'
-    : emptyBox('Sem valores registrados.');
+    ? tableWrap([{ t: colName }, { t: 'Leads', r: 1 }],
+      rows.map(r => '<tr><td class="name">' + esc(r.valor) + '</td><td class="r">' + fmt.num(r.leads) + '</td></tr>').join(''))
+    : emptyDashed('Sem valores registrados.');
 
-  let html = '<h2 class="page-title">Rastreamento (UTM)</h2>' +
-    '<p class="page-sub">Cobertura de parametrização dos leads do CRM. Esta página é a foto atual da base — não filtra por período.</p>';
+  let html = qualityBanners(false);
+  html += banner('blue', 'Cobertura de parametrização dos leads do CRM. Esta página retrata a <strong>foto atual da base</strong> e <strong>não usa o filtro de período</strong>.');
 
-  html += card('Cobertura de UTM',
-    '<div class="coverage-tile">' +
+  html += card('Cobertura de UTM', 'quantos leads chegam identificados ao CRM',
+    '<div class="coverage">' +
     '<div class="coverage-num">' + fmt.pct(cob.pct, 1) + '</div>' +
     '<div class="coverage-meta">' +
-    '<div>' + fmt.num(cob.com_utm) + ' de ' + fmt.num(cob.total) + ' leads chegam com UTM</div>' +
+    '<div><strong>' + fmt.num(cob.com_utm) + '</strong> de <strong>' + fmt.num(cob.total) + '</strong> leads chegam com UTM</div>' +
     '<div class="coverage-bar"><span style="width:' + Math.max(0, Math.min(100, cob.pct)) + '%"></span></div>' +
     '<div class="note" style="margin-top:0">Todo lead sem UTM vira "origem desconhecida" — o CPL por CRM descreve só a fatia rastreada.</div>' +
-    '</div></div>',
-    TAG_SNAPSHOT);
+    '</div></div>');
 
   html += '<div class="grid-2">' +
-    card('utm_source', listTable(utm.sources, 'Source'), TAG_SNAPSHOT) +
-    card('utm_campaign', listTable(utm.campaigns, 'Campanha'), TAG_SNAPSHOT) +
+    card('utm_source', 'origem gravada no lead · foto atual', listTable(utm.sources, 'Source')) +
+    card('utm_campaign', 'campanha gravada no lead · foto atual', listTable(utm.campaigns, 'Campanha')) +
     '</div>';
+
   html += '<div class="grid-2">' +
-    card('utm_content', listTable(utm.contents, 'Content'), TAG_SNAPSHOT) +
-    card('Performance por campanha (CRM)',
+    card('utm_content', 'conteúdo gravado no lead · foto atual', listTable(utm.contents, 'Content')) +
+    card('Performance por campanha (CRM)', 'leads, vendas e perdas por utm_campaign · foto atual',
       utm.campaigns_perf && utm.campaigns_perf.length
-        ? '<div class="table-wrap"><table><thead><tr><th>Campanha</th><th class="r">Leads</th><th class="r">Ganhos</th><th class="r">Perdidos</th><th class="r">Conversão</th></tr></thead><tbody>' +
-        utm.campaigns_perf.map(r =>
+        ? tableWrap([
+          { t: 'Campanha' }, { t: 'Leads', r: 1 }, { t: 'Vendas', r: 1 }, { t: 'Perdidos', r: 1 }, { t: 'Conversão', r: 1 }
+        ], utm.campaigns_perf.map(r =>
           '<tr><td class="name">' + esc(r.campanha) + '</td>' +
           '<td class="r">' + fmt.num(r.leads) + '</td>' +
           '<td class="r">' + fmt.num(r.ganhos) + '</td>' +
           '<td class="r">' + fmt.num(r.perdidos) + '</td>' +
-          '<td class="r">' + fmt.pct(r.conversao_pct) + '</td></tr>').join('') +
-        '</tbody></table></div>'
-        : emptyBox('Sem campanhas rastreadas.'),
-      TAG_SNAPSHOT) +
+          '<td class="r">' + fmt.pct(r.conversao_pct) + '</td></tr>').join(''))
+        : emptyDashed('Sem campanhas rastreadas.')) +
     '</div>';
 
-  html += card('Por que parametrizar 100% dos links?',
+  html += card('Por que parametrizar 100% dos links?', 'plano de correção do rastreamento',
     '<p style="font-size:13px;margin-bottom:8px">Hoje só ' + fmt.pct(cob.pct, 0) + ' dos leads chegam identificados. Sem UTM, o lead entra no CRM como "origem desconhecida" — impossível saber qual anúncio pagou por ele, e o CPL real fica invisível.</p>' +
     '<p style="font-size:13px;margin-bottom:8px"><strong>1.</strong> Todo link de anúncio, bio e formulário deve carregar utm_source, utm_medium e utm_campaign.</p>' +
     '<p style="font-size:13px;margin-bottom:8px"><strong>2.</strong> No Meta, usar <code>utm_content={{ad.name}}</code> — hoje o utm_content chega com o nome padrão do conjunto, o que impede atribuir lead a criativo. Com o parâmetro dinâmico, o funil por anúncio passa a existir.</p>' +
@@ -938,53 +1397,7 @@ function renderUTM(el) {
 }
 
 /* ============================================================
-   PÁGINA 7 — Relatório
-   ============================================================ */
-function renderRelatorio(el) {
-  const r = DATA.relatorio || {};
-  const delta = r.delta_leads_pct;
-  const deltaHtml = delta == null ? '' :
-    (delta >= 0
-      ? '<span class="up">▲ +' + fmt.dec(delta, 0) + '%</span> vs mês anterior (' + fmt.num(r.leads_mes_anterior) + ')'
-      : '<span class="down">▼ ' + fmt.dec(delta, 0) + '%</span> vs mês anterior (' + fmt.num(r.leads_mes_anterior) + ')');
-
-  let html = '<h2 class="page-title">Relatório — ' + mesNome(r.mes) + '</h2>' +
-    '<p class="page-sub">Resumo executivo do mês corrente. Esta página não usa o filtro de período. ' +
-    '<button class="btn no-print" onclick="window.print()" style="margin-left:8px">Imprimir</button></p>';
-
-  html += '<div class="kpis">' +
-    kpi('Leads do mês (CRM)', fmt.num(r.leads_mes), deltaHtml) +
-    kpi('Investimento Meta', fmt.currency(r.gasto_meta_mes), 'no mês') +
-    kpi('Conversas iniciadas', fmt.num(r.conversas_meta_mes), 'Meta — plataforma') +
-    kpi('CPL de plataforma', r.cpl_plat_mes == null ? '—' : fmt.currency(r.cpl_plat_mes), 'referência — leads da plataforma, não CRM') +
-    kpi('Rastreamento UTM', fmt.pct(r.rastreamento_pct), 'leads identificados') +
-    '</div>';
-
-  html += card('Resumo do mês',
-    '<ul class="report-list">' +
-    '<li><span class="k">Mês de referência</span><span class="v">' + mesNome(r.mes) + '</span></li>' +
-    '<li><span class="k">Leads criados no CRM</span><span class="v">' + fmt.num(r.leads_mes) + '</span></li>' +
-    '<li><span class="k">Leads no mês anterior</span><span class="v">' + fmt.num(r.leads_mes_anterior) + '</span></li>' +
-    '<li><span class="k">Variação de leads</span><span class="v">' + (delta == null ? '—' : (delta >= 0 ? '+' : '') + fmt.dec(delta, 0) + '%') + '</span></li>' +
-    '<li><span class="k">Investimento Meta no mês</span><span class="v">' + fmt.currency(r.gasto_meta_mes) + '</span></li>' +
-    '<li><span class="k">Conversas iniciadas (Meta)</span><span class="v">' + fmt.num(r.conversas_meta_mes) + '</span></li>' +
-    '<li><span class="k">CPL de plataforma (referência)</span><span class="v">' + (r.cpl_plat_mes == null ? '—' : fmt.currency(r.cpl_plat_mes)) + '</span></li>' +
-    '<li><span class="k">Cobertura de rastreamento (UTM)</span><span class="v">' + fmt.pct(r.rastreamento_pct) + '</span></li>' +
-    '</ul>' +
-    '<div class="note">O CPL de plataforma usa leads reportados pelo Meta e serve só de referência — o CPL oficial é sempre calculado com leads do CRM (ver página Meta Ads).</div>');
-
-  const alertas = r.alertas || [];
-  html += card('Alertas e ressalvas do mês',
-    alertas.length
-      ? '<ul class="alert-list">' + alertas.map(a =>
-        '<li><span class="alert-tipo">' + esc(a.tipo) + '</span><br>' + esc(a.texto) + '</li>').join('') + '</ul>'
-      : emptyBox('Nenhum alerta no momento.'));
-
-  el.innerHTML = html;
-}
-
-/* ============================================================
-   Carga de dados — dev (fetch direto) × produção (Supabase)
+   Carga de dados (sem login — autenticação em fase futura)
    ============================================================ */
 function showFatal(msg) {
   document.getElementById('loading').hidden = false;
@@ -993,17 +1406,14 @@ function showFatal(msg) {
   const sp = document.querySelector('#loading .spin');
   if (sp) sp.style.display = 'none';
 }
-
 async function loadData() {
-  // 1) Dados embutidos (data/summary.js) — cobre o duplo clique no
-  //    index.html, onde o navegador bloqueia fetch mas não <script src>.
+  // 1) Dados embutidos (data/summary.js) — cobre abrir com duplo clique.
   if (window.__SUMMARY__) {
     DATA = window.__SUMMARY__;
     startDashboard();
     return;
   }
-
-  // 2) Dados locais servidos junto do front (dev com servidor local).
+  // 2) Fallback: fetch do JSON servido junto do front.
   try {
     const res = await fetch('data/summary.json', { cache: 'no-store' });
     if (res.ok) {
@@ -1011,87 +1421,11 @@ async function loadData() {
       startDashboard();
       return;
     }
-  } catch (e) { /* sem dado local — segue */ }
-
-  // 3) Produção configurada → login (Supabase Auth + bucket privado).
-  if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-    showLogin();
-    return;
-  }
-
-  // 4) Nada disponível: explicar, nunca pedir senha que não existe.
-  showFatal('Os dados ainda não chegaram até aqui. Se você abriu o arquivo ' +
-    'pelo OneDrive, aguarde a sincronização terminar (na pasta do projeto, ' +
-    'botão direito → "Sempre manter neste dispositivo") e recarregue. A ' +
-    'versão publicada com login ainda não foi configurada pela agência.');
-}
-
-/* --- produção: login + Supabase Storage --- */
-function loadSupabaseLib() {
-  return new Promise((resolve, reject) => {
-    if (window.supabase) return resolve();
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Falha ao carregar supabase-js do CDN'));
-    document.head.appendChild(s);
-  });
-}
-async function initSupabase() {
-  await loadSupabaseLib();
-  sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-}
-async function downloadSummary() {
-  const { data, error } = await sbClient.storage.from(SUPABASE_BUCKET).download(SUPABASE_FILE);
-  if (error) throw error;
-  DATA = JSON.parse(await data.text());
-}
-function showLogin() {
-  document.getElementById('loading').hidden = true;
-  document.getElementById('login-screen').hidden = false;
-  const notice = document.getElementById('login-notice');
-  const btn = document.getElementById('login-btn');
-  const err = document.getElementById('login-err');
-
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    notice.hidden = false;
-    notice.textContent = 'Produção ainda não configurada: preencha SUPABASE_URL e SUPABASE_ANON_KEY em assets/app.js e crie o bucket privado "dashboard-data" com o summary.json.';
-    btn.disabled = true;
-    return;
-  }
-
-  // sessão já existente → pula o login
-  initSupabase().then(async () => {
-    try {
-      const { data } = await sbClient.auth.getSession();
-      if (data && data.session) {
-        await downloadSummary();
-        document.getElementById('login-screen').hidden = true;
-        startDashboard();
-      }
-    } catch (e) { /* segue para o login manual */ }
-  }).catch(e => { err.textContent = e.message; });
-
-  document.getElementById('login-form').addEventListener('submit', async ev => {
-    ev.preventDefault();
-    err.textContent = '';
-    btn.disabled = true;
-    try {
-      if (!sbClient) await initSupabase();
-      const email = document.getElementById('login-email').value.trim();
-      const password = document.getElementById('login-pass').value;
-      const { error } = await sbClient.auth.signInWithPassword({ email, password });
-      if (error) throw new Error('E-mail ou senha incorretos.');
-      await downloadSummary();
-      document.getElementById('login-screen').hidden = true;
-      startDashboard();
-    } catch (e) {
-      err.textContent = e.message || 'Erro ao entrar.';
-      try { if (sbClient) await sbClient.auth.signOut(); } catch (_) { /* noop */ }
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  } catch (e) { /* segue para a mensagem de erro */ }
+  // 3) Nada disponível: explicar o que fazer.
+  showFatal('Os dados ainda não chegaram até aqui. Se você abriu o arquivo pelo OneDrive, aguarde a ' +
+    'sincronização da pasta terminar (botão direito → "Sempre manter neste dispositivo") e recarregue. ' +
+    'Se estiver rodando local, suba um servidor na pasta dashboard (ex.: python -m http.server) e abra por ele.');
 }
 
 /* ============================================================
@@ -1101,17 +1435,15 @@ function startDashboard() {
   setupChartDefaults();
   computeDataBounds();
 
-  document.getElementById('stamp').textContent =
-    'Atualizado em ' + (DATA.last_update || '—') + ' · dados: ' + fmt.dateFull(DATA_MIN) + ' a ' + fmt.dateFull(DATA_MAX);
+  document.getElementById('stamp').textContent = 'atualizado em ' + (DATA.last_update || '—');
 
   document.getElementById('nav').innerHTML = PAGES.map(p =>
-    '<a href="#/' + p.id + '" data-page="' + p.id + '">' + p.label + '</a>').join('');
+    '<a href="#/' + p.id + '" data-page="' + p.id + '"><span class="ic">' + p.ic + '</span><span>' + p.label + '</span></a>').join('');
 
   buildFilterUI();
-  setPreset('30', false);
+  setPreset('all', false);
 
   document.getElementById('loading').hidden = true;
-  document.body.classList.add('ready');
 
   window.addEventListener('hashchange', route);
   route();

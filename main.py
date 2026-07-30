@@ -50,6 +50,7 @@ def main():
         sys.exit(1)
     salvar("meta_ads", meta_rows)
     salvar("meta_status", meta_ads_api.get_campaign_status())
+    salvar("meta_breakdowns", meta_ads_api.get_insights_breakdowns())
 
     print("Google Ads...")
     salvar("google_ads", google_ads.get_campaign_daily())
