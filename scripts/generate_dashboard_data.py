@@ -713,6 +713,16 @@ def main():
     kb = os.path.getsize(config.SUMMARY_PATH) / 1024
     print(f"summary.json gerado ({kb:.0f} KB) em {config.SUMMARY_PATH}")
 
+    # Cópia embutível em <script>: faz o dashboard abrir com DUPLO CLIQUE
+    # (file:// bloqueia fetch, mas não bloqueia <script src>). Local apenas —
+    # não é commitada nem publicada, igual ao summary.json.
+    js_path = config.SUMMARY_PATH[:-len(".json")] + ".js"
+    with open(js_path, "w", encoding="utf-8") as f:
+        f.write("window.__SUMMARY__=")
+        json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
+        f.write(";")
+    print(f"summary.js gerado (abre com duplo clique) em {js_path}")
+
     upload_to_supabase(config.SUMMARY_PATH)
 
 

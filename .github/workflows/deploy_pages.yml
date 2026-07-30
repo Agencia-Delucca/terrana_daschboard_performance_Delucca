@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Garantir que nenhum dado vaza no artefato
-        run: rm -f dashboard/data/summary.json
+        run: rm -f dashboard/data/summary.json dashboard/data/summary.js
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -9,6 +9,7 @@ credentials/
 # Dados — a cópia oficial vai pro Supabase, não pro repo
 data_raw/
 dashboard/data/summary.json
+dashboard/data/summary.js
 *.db
 
 # Python

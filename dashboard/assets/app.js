@@ -1002,14 +1002,22 @@ function isDevMode() {
 
 async function loadData() {
   if (isDevMode()) {
+    // Duplo clique no index.html (file://): o fetch é bloqueado pelo
+    // navegador, mas o data/summary.js embutido via <script> funciona.
+    if (window.__SUMMARY__) {
+      DATA = window.__SUMMARY__;
+      startDashboard();
+      return;
+    }
     try {
       const res = await fetch('data/summary.json', { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       DATA = await res.json();
       startDashboard();
     } catch (e) {
-      showFatal('Não foi possível carregar data/summary.json (' + e.message +
-        '). Rode um servidor local na pasta dashboard/ — ex.: python -m http.server 8010');
+      showFatal('Não foi possível carregar os dados (' + e.message + '). ' +
+        'Gere-os com "python scripts/generate_dashboard_data.py" na pasta do ' +
+        'projeto — depois disso o index.html abre até com duplo clique.');
     }
     return;
   }
