@@ -1,0 +1,37 @@
+name: ETL rapido (sem recoletar)
+
+# Depois de todo push que muda o schema do summary.json, rodar este workflow —
+# senão o front novo lê dado velho e parece quebrado (regra de ouro 11).
+# Ele recoleta tudo (a coleta da Terrana é rápida, ~3 min) e regenera o JSON.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coleta + ETL + upload
+        env:
+          KOMMO_SUBDOMAIN: ${{ secrets.KOMMO_SUBDOMAIN }}
+          KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TICKET_MEDIO: ${{ vars.TICKET_MEDIO }}
+          CPL_TARGET_META: ${{ vars.CPL_TARGET_META }}
+          CPL_TARGET_GOOGLE: ${{ vars.CPL_TARGET_GOOGLE }}
+        run: |
+          python -u main.py
+          python -u scripts/generate_dashboard_data.py

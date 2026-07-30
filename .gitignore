@@ -1,0 +1,17 @@
+# Credenciais — NUNCA versionar
+.env
+*token*
+*Token*
+*secret*
+*credential*
+credentials/
+
+# Dados — a cópia oficial vai pro Supabase, não pro repo
+data_raw/
+dashboard/data/summary.json
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/

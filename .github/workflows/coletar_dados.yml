@@ -1,0 +1,59 @@
+name: Coletar Dados Dashboard Terrana
+
+on:
+  schedule:
+    # 07:30, 13:30 e 16:00 BRT (UTC-3)
+    - cron: "30 10 * * *"
+    - cron: "30 16 * * *"
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Gate de secrets (nunca publicar dado vazio)
+        env:
+          KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$KOMMO_TOKEN" ] || [ -z "$META_ACCESS_TOKEN" ]; then
+            echo "::error::KOMMO_TOKEN/META_ACCESS_TOKEN ausentes nos Secrets"
+            exit 1
+          fi
+
+      - name: Coleta (Kommo + Meta + Google)
+        env:
+          KOMMO_SUBDOMAIN: ${{ secrets.KOMMO_SUBDOMAIN }}
+          KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_CUSTOMER_ID }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+        run: python -u main.py
+
+      - name: ETL + upload Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TICKET_MEDIO: ${{ vars.TICKET_MEDIO }}
+          CPL_TARGET_META: ${{ vars.CPL_TARGET_META }}
+          CPL_TARGET_GOOGLE: ${{ vars.CPL_TARGET_GOOGLE }}
+        run: python -u scripts/generate_dashboard_data.py
+
+      # O summary.json NÃO é commitado — a cópia oficial vive no bucket
+      # privado do Supabase. O repo só carrega código.

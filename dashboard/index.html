@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terrana B2B — Dashboard de Performance</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+
+  <!-- carregando / erro fatal -->
+  <div id="loading">
+    <div>
+      <div class="spin"></div>
+      <p id="loading-msg">Carregando dados…</p>
+    </div>
+  </div>
+
+  <!-- login (produção — Supabase) -->
+  <div id="login-screen" hidden>
+    <div class="login-box">
+      <div class="brand-mark">T</div>
+      <h2>Terrana B2B</h2>
+      <div class="sub">Dashboard de Performance — Agência Delucca</div>
+      <form id="login-form">
+        <input type="email" id="login-email" placeholder="E-mail" autocomplete="username" required>
+        <input type="password" id="login-pass" placeholder="Senha" autocomplete="current-password" required>
+        <button type="submit" id="login-btn">Entrar</button>
+      </form>
+      <div class="login-err" id="login-err"></div>
+      <div class="login-notice" id="login-notice" hidden></div>
+    </div>
+  </div>
+
+  <!-- sidebar -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">T</div>
+      <div class="name">Terrana B2B<small>Performance</small></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot"><strong>Agência Delucca</strong><br>dashboard de performance</div>
+  </aside>
+
+  <!-- conteúdo -->
+  <div id="main">
+    <header id="topbar">
+      <div class="who">
+        <h1>Terrana B2B</h1>
+        <span id="stamp"></span>
+      </div>
+      <div id="period-filter">
+        <div class="presets" id="presets"></div>
+        <label>De <input type="date" id="f-start"></label>
+        <label>Até <input type="date" id="f-end"></label>
+      </div>
+    </header>
+    <main id="content"></main>
+    <footer id="footer"><strong>Agência Delucca</strong> — dashboard de performance · Terrana B2B</footer>
+  </div>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

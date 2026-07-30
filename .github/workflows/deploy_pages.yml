@@ -1,0 +1,39 @@
+name: Deploy Dashboard (GitHub Pages)
+
+# Publica APENAS o front (HTML/JS/CSS). Nenhum dado vai para o Pages:
+# o summary.json vive no bucket privado do Supabase e o front o baixa
+# com sessão autenticada.
+
+on:
+  push:
+    branches: [main]
+    paths: ["dashboard/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Garantir que nenhum dado vaza no artefato
+        run: rm -f dashboard/data/summary.json
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
