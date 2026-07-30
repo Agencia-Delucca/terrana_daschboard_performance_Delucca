@@ -994,34 +994,36 @@ function showFatal(msg) {
   if (sp) sp.style.display = 'none';
 }
 
-function isDevMode() {
-  return location.hostname === 'localhost' ||
-    location.hostname === '127.0.0.1' ||
-    location.protocol === 'file:';
-}
-
 async function loadData() {
-  if (isDevMode()) {
-    // Duplo clique no index.html (file://): o fetch é bloqueado pelo
-    // navegador, mas o data/summary.js embutido via <script> funciona.
-    if (window.__SUMMARY__) {
-      DATA = window.__SUMMARY__;
+  // 1) Dados embutidos (data/summary.js) — cobre o duplo clique no
+  //    index.html, onde o navegador bloqueia fetch mas não <script src>.
+  if (window.__SUMMARY__) {
+    DATA = window.__SUMMARY__;
+    startDashboard();
+    return;
+  }
+
+  // 2) Dados locais servidos junto do front (dev com servidor local).
+  try {
+    const res = await fetch('data/summary.json', { cache: 'no-store' });
+    if (res.ok) {
+      DATA = await res.json();
       startDashboard();
       return;
     }
-    try {
-      const res = await fetch('data/summary.json', { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      DATA = await res.json();
-      startDashboard();
-    } catch (e) {
-      showFatal('Não foi possível carregar os dados (' + e.message + '). ' +
-        'Gere-os com "python scripts/generate_dashboard_data.py" na pasta do ' +
-        'projeto — depois disso o index.html abre até com duplo clique.');
-    }
+  } catch (e) { /* sem dado local — segue */ }
+
+  // 3) Produção configurada → login (Supabase Auth + bucket privado).
+  if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+    showLogin();
     return;
   }
-  showLogin();
+
+  // 4) Nada disponível: explicar, nunca pedir senha que não existe.
+  showFatal('Os dados ainda não chegaram até aqui. Se você abriu o arquivo ' +
+    'pelo OneDrive, aguarde a sincronização terminar (na pasta do projeto, ' +
+    'botão direito → "Sempre manter neste dispositivo") e recarregue. A ' +
+    'versão publicada com login ainda não foi configurada pela agência.');
 }
 
 /* --- produção: login + Supabase Storage --- */
