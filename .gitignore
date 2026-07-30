@@ -16,3 +16,6 @@ dashboard/data/summary.js
 __pycache__/
 *.pyc
 .venv/
+
+# Local Netlify folder
+.netlify
