@@ -81,12 +81,23 @@ def _actions_value(actions, action_type):
     return 0
 
 
+def _actions_money(action_values, action_type):
+    """Valor monetário de uma action (ex.: omni_purchase) em R$."""
+    for a in action_values or []:
+        if a.get("action_type") == action_type:
+            try:
+                return float(a.get("value", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
 def _fetch_month(since, until):
     params = {
         "level": "ad",
         "time_increment": 1,
         "fields": "campaign_name,adset_name,ad_name,ad_id,spend,impressions,"
-                  "clicks,inline_link_clicks,reach,actions",
+                  "clicks,inline_link_clicks,reach,actions,action_values",
         "time_range": f'{{"since":"{since}","until":"{until}"}}',
         "limit": 500,
         "access_token": config.META_ACCESS_TOKEN,
@@ -160,6 +171,11 @@ def get_ad_insights_daily(since=None):
                     "engajamento": _actions_value(r.get("actions"), "post_engagement"),
                     "video_views": _actions_value(r.get("actions"), "video_view"),
                     "seguidores": _actions_value(r.get("actions"), "like"),
+                    "compras": _actions_value(r.get("actions"), "omni_purchase")
+                    or _actions_value(r.get("actions"), "purchase"),
+                    "valor_compras": _actions_money(
+                        r.get("action_values"), "omni_purchase")
+                    or _actions_money(r.get("action_values"), "purchase"),
                     "thumbnail": cre.get("thumbnail", ""),
                     "permalink": cre.get("permalink", ""),
                 })

@@ -134,7 +134,9 @@ def match_leads_meta(leads, meta_rows):
     pool = {}
     for r in meta_rows:
         nome = r.get("campanha", "")
-        if nome and nome not in pool:
+        # Só campanhas da frente B2B: lead de CRM não pode cair em campanha
+        # de e-commerce por semelhança de nome.
+        if nome and nome not in pool and classificar_frente(nome) == "b2b":
             pool[nome] = _tokens(nome)
 
     daily = defaultdict(lambda: defaultdict(int))
@@ -393,6 +395,8 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
             b["cliques"] += r["cliques"]
             b["leads_plat"] += r["leads_plat"]
             b["conversas"] += r["conversas"]
+            b["compras"] += r.get("compras", 0)
+            b["valor_compras"] += r.get("valor_compras", 0)
 
         cd = camp_day[(camp, d)]
         cd["gasto"] += r["gasto"]
@@ -400,23 +404,29 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         cd["cliques"] += r["cliques"]
         cd["leads_plat"] += r["leads_plat"]
         cd["conversas"] += r["conversas"]
+        cd["compras"] += r.get("compras", 0)
+        cd["valor_compras"] += r.get("valor_compras", 0)
 
         ad_ = adset_day[(camp, conj, d)]
         ad_["gasto"] += r["gasto"]
         ad_["cliques"] += r["cliques"]
         ad_["leads_plat"] += r["leads_plat"]
         ad_["conversas"] += r["conversas"]
+        ad_["compras"] += r.get("compras", 0)
+        ad_["valor_compras"] += r.get("valor_compras", 0)
 
         crd = cre_day[(ad, camp, d)]
         crd["gasto"] += r["gasto"]
         crd["cliques"] += r["cliques"]
         crd["leads_plat"] += r["leads_plat"]
         crd["conversas"] += r["conversas"]
+        crd["compras"] += r.get("compras", 0)
+        crd["valor_compras"] += r.get("valor_compras", 0)
 
         cre = creatives.setdefault(ad, {
             "anuncio": ad, "campanha": camp, "conjunto": conj,
             "gasto": 0.0, "impressoes": 0, "cliques": 0, "leads_plat": 0,
-            "conversas": 0, "thumbnail": r.get("thumbnail", ""),
+            "conversas": 0, "compras": 0, "valor_compras": 0.0, "thumbnail": r.get("thumbnail", ""),
             "permalink": r.get("permalink", ""), "primeira_data": d,
             "ultima_data": d,
         })
@@ -425,6 +435,8 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         cre["cliques"] += r["cliques"]
         cre["leads_plat"] += r["leads_plat"]
         cre["conversas"] += r["conversas"]
+        cre["compras"] += r.get("compras", 0)
+        cre["valor_compras"] += r.get("valor_compras", 0)
         cre["campanha"] = camp          # nome mais recente vence
         cre["conjunto"] = conj
         cre["ultima_data"] = max(cre["ultima_data"], d)
@@ -445,7 +457,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         out = []
         for k, v in sorted(bucket.items()):
             item = {chave: k} if isinstance(k, str) else None
-            row = {kk: rnd(vv) if kk == "gasto" else
+            row = {kk: rnd(vv) if kk in ("gasto", "valor_compras") else
                    (rnd(vv, 1) if kk == "leads" else int(vv))
                    for kk, vv in v.items()}
             if row.get("impressoes"):
@@ -481,30 +493,30 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         "total_leads_plat": total_leads_plat,
         "total_conversas": total_conversas,
         "leads_crm_matched": total_matched,
-        "monthly": [{"mes": k, **{kk: rnd(vv) if kk == "gasto" else int(vv)
+        "monthly": [{"mes": k, **{kk: rnd(vv) if kk in ("gasto", "valor_compras") else int(vv)
                                   for kk, vv in v.items()},
                      "ctr": rnd(v["cliques"] / v["impressoes"] * 100, 2)
                      if v["impressoes"] else 0}
                     for k, v in sorted(monthly.items())],
-        "daily": [{"dia": k, **{kk: rnd(vv) if kk == "gasto" else int(vv)
+        "daily": [{"dia": k, **{kk: rnd(vv) if kk in ("gasto", "valor_compras") else int(vv)
                                 for kk, vv in v.items()}}
                   for k, v in sorted(daily.items())],
         "campaigns": campaigns_out,
         "campaign_daily": [
             {"dia": d, "campanha": c,
-             **{kk: rnd(vv) if kk == "gasto" else
+             **{kk: rnd(vv) if kk in ("gasto", "valor_compras") else
                 (rnd(vv, 1) if kk == "leads" else int(vv))
                 for kk, vv in v.items()}}
             for (c, d), v in sorted(camp_day.items(), key=lambda x: x[0][1])],
         "adset_daily": [
             {"dia": d, "campanha": c, "conjunto": cj,
-             **{kk: rnd(vv) if kk == "gasto" else
+             **{kk: rnd(vv) if kk in ("gasto", "valor_compras") else
                 (rnd(vv, 1) if kk == "leads" else int(vv))
                 for kk, vv in v.items()}}
             for (c, cj, d), v in sorted(adset_day.items(), key=lambda x: x[0][2])],
         "creatives_daily": [
             {"dia": d, "anuncio": a, "campanha": c,
-             **{kk: rnd(vv) if kk == "gasto" else
+             **{kk: rnd(vv) if kk in ("gasto", "valor_compras") else
                 (rnd(vv, 1) if kk == "leads" else int(vv))
                 for kk, vv in v.items()}}
             for (a, c, d), v in sorted(cre_day.items(), key=lambda x: x[0][2])
@@ -520,24 +532,30 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
     }
 
 
-def tipo_campanha(nome):
-    """Classifica a campanha Meta pelo NOME (mesmo padrão do projeto-base):
-    captação (formulário de leads), impulsionamento (alcance/tráfego/posts)
-    ou ecommerce (venda). O que não casar vira 'outras' com aviso."""
+def classificar_frente(nome):
+    """Frente da campanha pelo NOME (convenção combinada com a gestora):
+    - b2b: "AD - Formulário Nativo - Leads - B2B" hoje; futuras contendo
+      "Geração de leads B2B" (a landing page está a caminho);
+    - ecommerce: [ECOMMERCE] [VENDA] [COMPRA];
+    - inst: impulsionamento/posts da conta inteira (não é de uma frente).
+    O que não casar vira 'outras' com aviso — nunca é descartado em silêncio.
+    """
     n = (nome or "").lower()
-    if "formulário" in n or "formulario" in n or "leads" in n:
-        return "captacao"
-    if n.startswith("impulsionamento") or "instagram post" in n:
-        return "impulsionamento"
+    if ("formulário nativo" in n or "formulario nativo" in n
+            or "geração de leads b2b" in n or "geracao de leads b2b" in n
+            or ("leads" in n and "b2b" in n)):
+        return "b2b"
     if "ecommerce" in n or "[venda]" in n or "[compra]" in n:
         return "ecommerce"
-    print(f"::warning::Campanha sem tipo identificável no nome: '{nome}' — "
-          "classificada como 'outras'.")
+    if n.startswith("impulsionamento") or "instagram post" in n:
+        return "inst"
+    print(f"::warning::Campanha sem frente identificável no nome: '{nome}' — "
+          "classificada como 'outras'. Combinar a nomenclatura com o gestor.")
     return "outras"
 
 
 def aggregate_institucional(meta_rows, campaign_status):
-    """Página Institucional & Impulsionamento: só campanhas de boost.
+    """Página Institucional & Impulsionamento: só campanhas de boost (inst).
 
     Alcance fica de fora de propósito: reach não é aditivo — somar
     anúncio×dia inflaria o número (regra 9: não inventar dado).
@@ -547,9 +565,9 @@ def aggregate_institucional(meta_rows, campaign_status):
     split = defaultdict(float)
 
     for r in meta_rows:
-        tipo = tipo_campanha(r["campanha"])
-        split[tipo] += r["gasto"]
-        if tipo != "impulsionamento":
+        frente = classificar_frente(r["campanha"])
+        split[frente] += r["gasto"]
+        if frente != "inst":
             continue
         m = r["data"][:7]
         for bucket, key in ((monthly, m), (campanhas, r["campanha"])):
@@ -563,7 +581,7 @@ def aggregate_institucional(meta_rows, campaign_status):
             b["conversas"] += r["conversas"]
 
     def fecha(v):
-        return {kk: rnd(vv) if kk == "gasto" else int(vv) for kk, vv in v.items()}
+        return {kk: rnd(vv) if kk in ("gasto", "valor_compras") else int(vv) for kk, vv in v.items()}
 
     return {
         "split_gasto": {k: rnd(v) for k, v in sorted(split.items())},
@@ -582,7 +600,9 @@ def aggregate_publico(breakdowns):
         return {"disponivel": False}
 
     def fecha(rows):
-        return [{**r, "gasto": rnd(r.get("gasto", 0))} for r in rows]
+        return [{**r, "gasto": rnd(r.get("gasto", 0)),
+                 "frente": classificar_frente(r.get("campanha"))}
+                for r in rows]
 
     return {
         "disponivel": any(breakdowns.get(k) for k in
@@ -805,10 +825,19 @@ def main():
     leads_agg = aggregate_leads(leads)
     crm = aggregate_crm(leads, statuses)
     atendimento = aggregate_atendimento(events, talks)
-    meta = aggregate_meta_ads(meta_rows, leads_daily_map, meta_status) \
-        if meta_rows else None
-    if meta:
-        meta["matching"] = matching_stats
+
+    # Duas frentes: B2B Atacado (leads via CRM) e E-commerce (venda direta).
+    # Impulsionamento (inst) é da conta inteira e tem seção própria.
+    rows_b2b = [r for r in meta_rows
+                if classificar_frente(r["campanha"]) == "b2b"]
+    rows_ecom = [r for r in meta_rows
+                 if classificar_frente(r["campanha"]) == "ecommerce"]
+    meta_b2b = aggregate_meta_ads(rows_b2b, leads_daily_map, meta_status) \
+        if rows_b2b else None
+    if meta_b2b:
+        meta_b2b["matching"] = matching_stats
+    meta_ecom = aggregate_meta_ads(rows_ecom, {}, meta_status) \
+        if rows_ecom else None
     utm = aggregate_utm(leads)
 
     google = {"disponivel": bool(google_rows), "motivo": ""
@@ -834,7 +863,8 @@ def main():
         "leads": leads_agg,
         "crm": crm,
         "atendimento": atendimento,
-        "meta_ads": meta,
+        "meta_b2b": meta_b2b,
+        "meta_ecom": meta_ecom,
         "google_ads": google,
         "utm": utm,
         "institucional": aggregate_institucional(meta_rows, meta_status)
@@ -844,11 +874,11 @@ def main():
             leads, statuses, events),
     }
     summary["relatorio"] = build_relatorio(
-        leads_agg, crm, meta or {"monthly": []}, atendimento, utm)
+        leads_agg, crm, meta_b2b or {"monthly": []}, atendimento, utm)
 
     # Sanidade (regra 6): decomposição nunca maior que o KPI.
-    if meta:
-        soma_camp = sum(c["leads_crm"] for c in meta["campaigns"])
+    if meta_b2b:
+        soma_camp = sum(c["leads_crm"] for c in meta_b2b["campaigns"])
         if soma_camp > matching_stats["leads_pagos_meta"] + 0.01:
             print(f"::error::Rateio duplicando leads: soma por campanha "
                   f"{soma_camp} > leads pagos {matching_stats['leads_pagos_meta']}")

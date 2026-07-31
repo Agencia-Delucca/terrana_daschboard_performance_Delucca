@@ -1,8 +1,18 @@
 /* ============================================================
-   Terrana B2B — Dashboard de Performance (Agência Delucca)
-   SPA estática no padrão visual da agência (SPEC_VISUAL_REFERENCIA.md).
+   Terrana — Dashboards de Performance (Agência Delucca)
+   SPA estática: TELA SELETORA + dois painéis (B2B Atacado / E-commerce).
+   Roteamento 100% por hash: "" → seletor · "#b2b/<pág>" · "#ecom/<pág>".
    Dados: window.__SUMMARY__ (data/summary.js) → fetch data/summary.json.
    Sem login, sem Supabase — autenticação entra numa fase futura.
+
+   Redesign guiado pela skill dataviz:
+   - Séries usam SÓ a paleta categórica validada (mostarda/terracota/oliva),
+     em ordem fixa por entidade; acentos vivos da marca ficam na UI.
+   - Sem eixo duplo: combos viraram small multiples empilhados no mesmo X.
+   - Nominal = 1 cor (terracota); ordinal = rampa âmbar monotônica.
+   - Terracota (2,99:1 no fundo) sempre com relief: rótulo direto ou tabela.
+   - Texto nunca na cor da série; tooltip em tudo; animação off;
+     registry de charts destruído a cada navegação (anti-leak).
    ============================================================ */
 'use strict';
 
@@ -11,24 +21,37 @@ let DATA = null;                       // summary.json inteiro
 const CHARTS = {};                     // registry Chart.js (anti-leak)
 const FILTER = { start: null, end: null, preset: 'all' };
 let DATA_MIN = null, DATA_MAX = null;
+let CURRENT_FRONT = null;              // 'b2b' | 'ecom' | null (seletor)
+let LAST_ROUTE = null;                 // 'front/página' — p/ só rolar ao topo em troca de página
+let ECOM_PUB_VIEW = 'ecommerce';       // toggle da página Público do e-commerce
 
-/* ---------- Paleta (tokens da spec) ---------- */
+/* ---------- Paleta ----------
+   UI (tokens da marca — nav, gradientes, KPI de destaque): P.*
+   SÉRIES de dados (validadas pelo validador da skill dataviz): S.*
+   Ordinal: AMBER_RAMP (um matiz, claro→escuro, monotônico)
+   Status (ACTIVE/PAUSED, ganho/perda, avisos): ST.* — nunca séries. */
 const P = {
   bgCard: '#1A120A',
   border: '#332415',
   track: '#241910',
-  blue: '#E0A526',
-  teal: '#D4692E',
-  green: '#10B981',
-  red: '#EF4444',
-  amber: '#F59E0B',
+  accent: '#E0A526',                   // acento vivo — UI apenas
+  accent2: '#C9622A',                  // acento vivo — UI apenas
   muted: '#A28D74',
   soft: '#DECFB8',
   text: '#F7F1E6',
-  blueLight: '#F2CC7B',
-  grid: 'rgba(255,255,255,.05)',
-  redShades: ['#EF4444', '#B91C1C', '#F87171', '#7F1D1D', '#FCA5A5', '#DC2626']
+  accentLight: '#F2CC7B',
+  grid: 'rgba(255,255,255,.05)'
 };
+const S = {
+  mostarda: '#BD8A0C',
+  terracota: '#A64114',
+  oliva: '#74A335'
+};
+/* 6 passos: o antigo extremo #453107 reprovava no validador ordinal
+   (1,49:1 sobre a superfície #1A120A — piso 2:1). Terminar em #684A0A
+   mantém a rampa monotônica e passa todos os checks (2,27:1). */
+const AMBER_RAMP = ['#F6DC9C', '#EEC25B', '#E0A526', '#B78312', '#8E650E', '#684A0A'];
+const ST = { green: '#10B981', red: '#EF4444', amber: '#F59E0B' };
 
 /* ============================================================
    Formatação (100% pt-BR)
@@ -37,7 +60,9 @@ const fmt = {
   num: v => Math.round(v || 0).toLocaleString('pt-BR'),
   dec: (v, d = 1) => (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }),
   currency: v => 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  moneyShort: v => 'R$ ' + Math.round(v || 0).toLocaleString('pt-BR'),
   pct: (v, d = 1) => v == null ? '—' : fmt.dec(v, d) + '%',
+  roas: v => v == null ? '—' : fmt.dec(v, 2) + '×',
   date: iso => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) : '—',
   dateFull: iso => iso ? iso.split('-').reverse().join('/') : '—',
   days: v => v == null ? '—' : fmt.dec(v, 1) + 'd',
@@ -58,6 +83,18 @@ function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+/* Só renderiza link se o permalink for https:// — esc() impede escapar do
+   atributo, mas não bloquearia um scheme javascript: vindo do JSON. */
+function safeHttpUrl(u) {
+  if (typeof u !== 'string') return null;
+  const t = u.trim();
+  return /^https:\/\//i.test(t) ? t : null;
+}
+/* Dicionário sem Object.prototype: chaves vindas de nomes de campanha/etapa
+   ("__proto__", "constructor", …) viram propriedades normais. */
+function dict(src) {
+  return Object.assign(Object.create(null), src || {});
 }
 
 /* ============================================================
@@ -103,17 +140,8 @@ function quantile(sortedAsc, q) {
   const lo = Math.floor(pos), hi = Math.ceil(pos);
   return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (pos - lo);
 }
-/* Classificação de campanha Meta pelo nome — espelho de tipo_campanha()
-   do ETL (scripts/generate_dashboard_data.py). */
-function tipoCampanha(nome) {
-  const n = (nome || '').toLowerCase();
-  if (n.indexOf('formulário') >= 0 || n.indexOf('formulario') >= 0 || n.indexOf('leads') >= 0) return 'captacao';
-  if (n.indexOf('impulsionamento') === 0 || n.indexOf('instagram post') >= 0) return 'impulsionamento';
-  if (n.indexOf('ecommerce') >= 0 || n.indexOf('[venda]') >= 0 || n.indexOf('[compra]') >= 0) return 'ecommerce';
-  return 'outras';
-}
 function aggBy(rows, keyFn, fields) {
-  const m = {};
+  const m = Object.create(null);          // nomes de campanha são dados externos
   (rows || []).forEach(r => {
     const k = keyFn(r);
     if (!m[k]) { m[k] = { __row: r }; fields.forEach(f => { m[k][f] = 0; }); }
@@ -127,10 +155,11 @@ function aggBy(rows, keyFn, fields) {
    ============================================================ */
 function kpi(label, value, sub, opts) {
   opts = opts || {};
+  const cls = 'kpi' + (opts.hero ? ' hero' : '');
   const v = (value == null)
     ? '<div class="kpi-dash" title="sem dado"></div>'
     : '<div class="kpi-value' + (opts.teal ? ' teal' : '') + '">' + value + '</div>';
-  return '<div class="kpi"><div class="kpi-label">' + label + '</div>' + v +
+  return '<div class="' + cls + '"><div class="kpi-label">' + label + '</div>' + v +
     (sub ? '<div class="kpi-sub">' + sub + '</div>' : '') + '</div>';
 }
 function card(title, sub, body) {
@@ -139,18 +168,27 @@ function card(title, sub, body) {
       (sub ? '<div class="card-sub">' + sub + '</div>' : '') + '</div>' : '') +
     body + '</div>';
 }
-function chartCard(title, sub, canvasId, boxCls, note) {
+function chartBox(id, cls) {
+  return '<div class="chart-box ' + (cls || '') + '"><canvas id="' + id + '"></canvas></div>';
+}
+function chartCard(title, sub, canvasId, boxCls, extra) {
+  return card(title, sub, chartBox(canvasId, boxCls) + (extra || ''));
+}
+/* Small multiples: 2 gráficos empilhados no MESMO eixo X (substitui eixo duplo) */
+function multiChartCard(title, sub, idTop, idBottom, extra) {
   return card(title, sub,
-    '<div class="chart-box ' + (boxCls || '') + '"><canvas id="' + canvasId + '"></canvas></div>' +
-    (note ? '<div class="note">' + note + '</div>' : ''));
+    '<div class="chart-box multi"><canvas id="' + idTop + '"></canvas></div>' +
+    '<div class="chart-box multi"><canvas id="' + idBottom + '"></canvas></div>' +
+    (extra || ''));
 }
 function banner(kind, html) {
   return '<div class="banner ' + kind + '">' +
     (kind === 'amber' ? '<span class="b-ic">⚠</span>' : '') +
     '<div>' + html + '</div></div>';
 }
-/* Os 2 primeiros alertas do ETL são os banners âmbar padrão de todas as
-   páginas; a Visão Geral mostra a lista completa. */
+/* Os 2 primeiros alertas do ETL são os banners âmbar padrão das páginas B2B;
+   a Visão Geral B2B mostra a lista completa. (Os alertas descrevem CRM/UTM —
+   não se aplicam ao painel E-commerce.) */
 function qualityBanners(all) {
   const alertas = (DATA.relatorio && DATA.relatorio.alertas) || [];
   const list = all ? alertas : alertas.slice(0, 2);
@@ -165,6 +203,18 @@ function tableWrap(headCells, rowsHtml) {
   return '<div class="table-wrap"><table><thead><tr>' +
     headCells.map(h => '<th' + (h.r ? ' class="r"' : '') + '>' + h.t + '</th>').join('') +
     '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+}
+/* Relief de acessibilidade: tabela dobrável sob o gráfico (exigida pelo
+   validador para séries terracota sem rótulo em todo ponto). */
+function reliefTable(headCells, rowsHtml) {
+  return '<details class="tbl-relief"><summary>Ver tabela</summary>' +
+    tableWrap(headCells, rowsHtml) + '</details>';
+}
+function dailyRelief(series, cols) {
+  const rows = series.days.map((d, i) =>
+    '<tr><td>' + fmt.dateFull(d) + '</td>' +
+    cols.map(c => '<td class="r">' + c.f(series.data[c.k][i]) + '</td>').join('') + '</tr>').join('');
+  return reliefTable([{ t: 'Dia' }].concat(cols.map(c => ({ t: c.t, r: 1 }))), rows);
 }
 function statusBadge(st) {
   if (st === 'ACTIVE') return '<span class="badge green">Ativo</span>';
@@ -184,9 +234,17 @@ function periodLabel() {
   return fmt.dateFull(FILTER.start) + ' a ' + fmt.dateFull(FILTER.end);
 }
 
-/* ---------- Funil (componente da spec) ---------- */
+/* ---------- Funil (rampa ordinal âmbar + terminais de status) ---------- */
+function amberStep(i, n) {
+  if (n <= 1) return AMBER_RAMP[2];
+  const idx = Math.round(i * (AMBER_RAMP.length - 1) / (n - 1));
+  return AMBER_RAMP[Math.min(idx, AMBER_RAMP.length - 1)];
+}
+function amberFg(hex) {
+  return AMBER_RAMP.indexOf(hex) >= 4 ? '#F7F1E6' : '#241203';
+}
 function stageKinds() {
-  const kinds = {};
+  const kinds = Object.create(null);      // etapa vem do CRM (dado externo)
   ((DATA.crm || {}).deals_minimal || []).forEach(d => {
     if (d.ganho) kinds[d.etapa] = 'won';
     else if (d.perdido) kinds[d.etapa] = 'lost';
@@ -197,7 +255,7 @@ function funnelPeriodStages() {
   const kinds = stageKinds();
   const order = ((DATA.crm || {}).funnel || []).slice().sort((a, b) => a.sort - b.sort);
   const deals = ((DATA.crm || {}).deals_minimal || []).filter(d => inPeriod(d.criado_em));
-  const cnt = {};
+  const cnt = Object.create(null);
   deals.forEach(d => { cnt[d.etapa] = (cnt[d.etapa] || 0) + 1; });
   return {
     total: deals.length,
@@ -207,38 +265,95 @@ function funnelPeriodStages() {
 function funnelHtml(fp) {
   if (!fp.stages.length) return emptyDashed('Sem etapas de funil no CRM.', 'Verifique o pipeline no Kommo.');
   const max = Math.max.apply(null, fp.stages.map(s => s.total).concat([1]));
-  let prev = null, first = true;
-  const rows = fp.stages.map(s => {
+  const nProg = fp.stages.filter(s => !s.kind).length;
+  const html = fp.stages.map((s, k) => {
     const w = s.total / max * 100;
     let pct = '';
-    if (!first) {
-      // Spec (componente 7): a partir da 2ª etapa, sempre "% da anterior".
-      // Para as terminais (ganho/perda), "anterior" = última etapa de progresso.
-      pct = (prev && prev > 0) ? fmt.dec(s.total / prev * 100, 0) + '% da<br>anterior' : '—';
+    if (k > 0) {
+      const prevProg = (function () {
+        for (let j = k - 1; j >= 0; j--) if (!fp.stages[j].kind) return fp.stages[j].total;
+        return null;
+      })();
+      pct = (prevProg && prevProg > 0) ? fmt.dec(s.total / prevProg * 100, 0) + '% da<br>anterior' : '—';
     }
-    if (!s.kind) { prev = s.total; first = false; }
-    const cls = s.kind === 'won' ? ' won' : (s.kind === 'lost' ? ' lost' : '');
+    let cls = '', style = 'width:' + w + '%';
+    if (!s.kind) {
+      const progIdx = fp.stages.slice(0, k).filter(x => !x.kind).length;
+      const bg = amberStep(progIdx, nProg);
+      style += ';background:' + bg + ';color:' + amberFg(bg);
+    } else {
+      cls = s.kind === 'won' ? ' won' : ' lost';
+    }
     return '<div class="funnel-row">' +
       '<div class="f-label">' + esc(s.etapa) + '</div>' +
-      '<div class="f-track"><div class="f-bar' + cls + '" style="width:' + w + '%">' + fmt.num(s.total) + '</div></div>' +
+      '<div class="f-track"><div class="f-bar' + cls + '" style="' + style + '">' + fmt.num(s.total) + '</div></div>' +
       '<div class="f-pct">' + pct + '</div></div>';
   }).join('');
-  return '<div class="funnel">' + rows + '</div>';
+  return '<div class="funnel">' + html + '</div>';
 }
 
 /* ============================================================
-   Chart.js — defaults, registry, helpers
+   Chart.js — defaults, registry, plugin de rótulo direto
    ============================================================ */
 function chartsReady() { return typeof Chart !== 'undefined'; }
+
+/* Rótulos diretos seletivos, desenhados em creme/soft (texto nunca na cor
+   da série). options.plugins.directLabels = { mode:'all'|'max', format, datasets } */
+const directLabelsPlugin = {
+  id: 'directLabels',
+  // Sem opções "scriptable": o resolver do Chart.js chamaria format() com o
+  // contexto como argumento — lemos a config CRUA para preservar a função.
+  descriptors: { _scriptable: false, _indexable: false },
+  afterDatasetsDraw(chart) {
+    const o = ((chart.config.options || {}).plugins || {}).directLabels;
+    if (!o || !o.mode) return;
+    const ctx = chart.ctx;
+    const horizontal = chart.options.indexAxis === 'y';
+    ctx.save();
+    ctx.font = "600 10.5px 'Montserrat','Segoe UI',sans-serif";
+    ctx.fillStyle = P.soft;
+    chart.data.datasets.forEach((ds, di) => {
+      if (o.datasets && o.datasets.indexOf(di) < 0) return;
+      const meta = chart.getDatasetMeta(di);
+      if (!meta || meta.hidden) return;
+      let idxs = [];
+      if (o.mode === 'all') {
+        idxs = ds.data.map((v, i) => i).filter(i => ds.data[i] != null);
+      } else { // 'max': só o extremo de cada série (rótulo seletivo)
+        let best = -1, bv = -Infinity;
+        ds.data.forEach((v, i) => { if (v != null && v > bv) { bv = v; best = i; } });
+        if (best >= 0) idxs = [best];
+      }
+      idxs.forEach(i => {
+        const el = meta.data[i];
+        if (!el) return;
+        const v = ds.data[i];
+        const txt = o.format ? o.format(v) : fmt.num(v);
+        if (horizontal) {
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(txt, el.x + 6, el.y);
+        } else {
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(txt, el.x, el.y - 5);
+        }
+      });
+    });
+    ctx.restore();
+  }
+};
+
 function setupChartDefaults() {
   if (!chartsReady()) return;
+  Chart.register(directLabelsPlugin);
   Chart.defaults.color = P.muted;
   Chart.defaults.borderColor = P.grid;
-  Chart.defaults.font.family = "'Inter','Segoe UI',system-ui,-apple-system,Roboto,sans-serif";
+  Chart.defaults.font.family = "'Montserrat','Segoe UI',system-ui,-apple-system,Roboto,sans-serif";
   Chart.defaults.font.size = 11;
   Chart.defaults.animation = false;
   Chart.defaults.locale = 'pt-BR';
-  Chart.defaults.plugins.tooltip.backgroundColor = '#1A120A';
+  Chart.defaults.plugins.tooltip.backgroundColor = P.bgCard;
   Chart.defaults.plugins.tooltip.borderColor = P.border;
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.titleColor = P.text;
@@ -264,7 +379,7 @@ function makeChart(id, config) {
 function legendTop() {
   return {
     display: true, position: 'top', align: 'center',
-    labels: { boxWidth: 28, boxHeight: 14, color: P.soft, padding: 14, usePointStyle: false }
+    labels: { boxWidth: 22, boxHeight: 12, color: P.soft, padding: 14, usePointStyle: false }
   };
 }
 function xDaily() {
@@ -275,7 +390,6 @@ function xDaily() {
 }
 function xCat(extra) {
   // maxRotation/minRotation 0 desfazem a rotação de 45° herdada de xDaily()
-  // via deepMerge em baseOpts — eixo categórico tem rótulo reto.
   const o = { grid: { display: false }, ticks: { color: P.muted, maxRotation: 0, minRotation: 0 } };
   return deepMerge(o, extra || {});
 }
@@ -283,20 +397,23 @@ function yCount(extra) {
   const o = {
     beginAtZero: true,
     grid: { color: P.grid, drawTicks: false },
-    // Sem precision:0 — a spec mostra ticks fracionários (0,5 · 1,0 …) nos
-    // gráficos de contagem baixa; locale pt-BR garante a vírgula decimal.
     ticks: { color: P.muted }
   };
   return deepMerge(o, extra || {});
 }
 function yMoney(extra) {
-  return yCount(deepMerge({ ticks: { callback: v => 'R$ ' + v } }, extra || {}));
+  return yCount(deepMerge({ ticks: { callback: v => 'R$ ' + Number(v).toLocaleString('pt-BR') } }, extra || {}));
+}
+/* Nos small multiples, trava a largura do eixo Y para os dois gráficos
+   ficarem alinhados no mesmo X mesmo com escalas diferentes. */
+function lockYWidth(scaleOpts, w) {
+  scaleOpts.afterFit = s => { s.width = w || 64; };
+  return scaleOpts;
 }
 function moneyTooltip() {
   return {
     label: ctx => {
-      // Em barra horizontal (indexAxis 'y'), o valor está em parsed.x e
-      // parsed.y é o ÍNDICE da categoria — nunca null (Chart.js 4).
+      // Barra horizontal (indexAxis 'y'): valor em parsed.x.
       const v = ctx.chart.options.indexAxis === 'y' ? ctx.parsed.x : ctx.parsed.y;
       return (ctx.dataset.label ? ctx.dataset.label + ': ' : '') + fmt.currency(v);
     }
@@ -307,7 +424,7 @@ function baseOpts(extra) {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
-    interaction: { mode: 'index', intersect: false },
+    interaction: { mode: 'index', intersect: false },   // área de hover > marca
     plugins: { legend: { display: false } },
     scales: { x: xDaily(), y: yCount() }
   };
@@ -323,34 +440,151 @@ function deepMerge(a, b) {
   });
   return a;
 }
+/* Datasets padrão (marcas finas: barra ≤24px, canto 4px só na ponta,
+   linha 2px, marcador ≥8px de área de acerto) */
+function barDs(label, data, color, extra) {
+  return deepMerge({
+    label, data, backgroundColor: color,
+    borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 24
+  }, extra || {});
+}
+function lineDs(label, data, color, extra) {
+  return deepMerge({
+    label, data, borderColor: color, backgroundColor: color + '1A', // wash ~10%
+    borderWidth: 2, pointRadius: 2, pointHoverRadius: 5, tension: .3
+  }, extra || {});
+}
 
 /* ============================================================
-   Roteamento (SPA por hash) + sidebar
+   Frentes, páginas e roteamento por hash
+   "" → seletor · "#b2b/<pág>" · "#ecom/<pág>"
    ============================================================ */
-const PAGES = [
-  { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoGeral },
-  { id: 'funil', label: 'Funil CRM', ic: '🎯', render: renderFunilCRM },
-  { id: 'atendimento', label: 'Atendimento', ic: '💬', render: renderAtendimento },
-  { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaAds },
-  { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
-  { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
-  { id: 'publico', label: 'Público', ic: '👥', render: renderPublico },
-  { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucao },
-  { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM }
-];
-function currentPageId() {
+const FRONTS = {
+  b2b: {
+    key: 'b2b',
+    title: 'Terrana B2B Atacado',
+    badge: 'B2B Atacado',
+    badgeSub: 'leads e funil de vendas no atacado',
+    pages: [
+      { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoB2B },
+      { id: 'funil', label: 'Funil CRM', ic: '🎯', render: renderFunilCRM },
+      { id: 'atendimento', label: 'Atendimento', ic: '💬', render: renderAtendimento },
+      { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaB2B },
+      { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
+      { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'b2b') },
+      { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoB2B },
+      { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM }
+    ]
+  },
+  ecom: {
+    key: 'ecom',
+    title: 'Terrana E-commerce',
+    badge: 'E-commerce',
+    badgeSub: 'loja online e venda direta',
+    pages: [
+      { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoEcom },
+      { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaEcom },
+      { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
+      { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'ecom') },
+      { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoEcom }
+    ]
+  }
+};
+function parseHash() {
   const h = (location.hash || '').replace(/^#\/?/, '');
-  return PAGES.some(p => p.id === h) ? h : 'visao';
+  if (!h) return { front: null, page: null };
+  const seg = h.split('/');
+  const f = FRONTS[seg[0]];
+  if (!f) return { front: null, page: null };
+  const page = f.pages.some(p => p.id === seg[1]) ? seg[1] : f.pages[0].id;
+  return { front: seg[0], page };
+}
+function applyFront(frontKey) {
+  CURRENT_FRONT = frontKey;
+  const f = FRONTS[frontKey];
+  document.getElementById('front-name').textContent = f.badge;
+  document.getElementById('front-sub').textContent = f.badgeSub;
+  document.getElementById('nav').innerHTML = f.pages.map(p =>
+    '<a href="#' + f.key + '/' + p.id + '" data-page="' + p.id + '"><span class="ic">' + p.ic + '</span><span>' + p.label + '</span></a>').join('');
+  document.getElementById('foot-front').textContent = f.title;
 }
 function route() {
   if (!DATA) return;
-  const id = currentPageId();
   destroyAllCharts();
-  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === id));
-  const page = PAGES.find(p => p.id === id);
-  document.getElementById('page-title').textContent = 'Terrana B2B · ' + page.label;
+  const r = parseHash();
+  // Só rola ao topo quando a PÁGINA muda — re-render por filtro de período
+  // ou toggle mantém a posição de leitura do usuário.
+  const routeKey = r.front ? r.front + '/' + r.page : '';
+  const pageChanged = routeKey !== LAST_ROUTE;
+  LAST_ROUTE = routeKey;
+  document.body.classList.toggle('mode-select', !r.front);
+  if (!r.front) {
+    CURRENT_FRONT = null;
+    document.title = 'Terrana — Dashboards de Performance · Agência Delucca';
+    renderSelector();
+    if (pageChanged) window.scrollTo(0, 0);
+    return;
+  }
+  if (r.front !== CURRENT_FRONT) applyFront(r.front);
+  const f = FRONTS[r.front];
+  const page = f.pages.find(p => p.id === r.page);
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page.id));
+  document.getElementById('page-title').textContent = f.title + ' · ' + page.label;
+  document.title = f.title + ' · ' + page.label + ' — Agência Delucca';
   page.render(document.getElementById('content'));
-  window.scrollTo(0, 0);
+  if (pageChanged) window.scrollTo(0, 0);
+}
+
+/* ============================================================
+   TELA SELETORA — página de entrada
+   ============================================================ */
+function renderSelector() {
+  const el = document.getElementById('selector');
+  const logo = document.querySelector('.brand-mark');
+  const leadsCrm = (DATA.leads || {}).total || 0;
+  const gastoB2B = (DATA.meta_b2b || {}).total_gasto || 0;
+  const pagos = (DATA.leads || {}).pagos || 0;
+  const cplCrm = (gastoB2B > 0 && pagos > 0) ? gastoB2B / pagos : null;
+  const ecomM = (DATA.meta_ecom || {}).monthly || [];
+  const compras = sum(ecomM, 'compras');
+  const receita = sum(ecomM, 'valor_compras');
+  const gastoEcom = (DATA.meta_ecom || {}).total_gasto || 0;
+  const roas = gastoEcom > 0 ? receita / gastoEcom : null;
+
+  el.innerHTML =
+    '<div class="sel-inner">' +
+    (logo ? '<img class="sel-logo" src="' + logo.src + '" alt="Terrana">' : '') +
+    '<h1 class="sel-title">Terrana — Dashboards de Performance</h1>' +
+    '<p class="sel-sub">Escolha a frente que você quer analisar</p>' +
+    '<div class="sel-cards">' +
+
+    '<a class="sel-card" href="#b2b/visao">' +
+    '<div class="sel-kicker">Painel</div>' +
+    '<h2>B2B Atacado</h2>' +
+    '<p class="sel-desc">Leads e funil de vendas no atacado</p>' +
+    '<div class="sel-stats">' +
+    '<div class="sel-stat"><span class="v">' + fmt.num(leadsCrm) + '</span><span class="l">leads no CRM</span></div>' +
+    '<div class="sel-stat"><span class="v">' + (cplCrm == null ? '—' : fmt.currency(cplCrm)) + '</span><span class="l">CPL (CRM)</span></div>' +
+    '</div>' +
+    '<div class="sel-go">Abrir painel →</div>' +
+    '</a>' +
+
+    '<a class="sel-card" href="#ecom/visao">' +
+    '<div class="sel-kicker">Painel</div>' +
+    '<h2>E-commerce</h2>' +
+    '<p class="sel-desc">Loja online e venda direta</p>' +
+    '<div class="sel-stats">' +
+    '<div class="sel-stat"><span class="v">' + fmt.num(compras) + '</span><span class="l">compras</span></div>' +
+    '<div class="sel-stat"><span class="v">' + (roas == null ? '—' : fmt.dec(roas, 2) + '×') + '</span><span class="l">ROAS</span></div>' +
+    '</div>' +
+    '<div class="sel-go">Abrir painel →</div>' +
+    '</a>' +
+
+    '</div>' +
+    '<div class="sel-note">números de toda a série — esta tela não usa o filtro de período dos painéis</div>' +
+    '<div class="sel-foot"><strong>Agência Delucca</strong> — dashboards de performance · atualizado em ' +
+    esc(DATA.last_update || '—') + '</div>' +
+    '</div>';
 }
 
 /* ============================================================
@@ -360,7 +594,8 @@ function computeDataBounds() {
   const dates = [];
   const push = (list, key) => (list || []).forEach(r => { if (r[key]) dates.push(r[key]); });
   push(DATA.leads && DATA.leads.daily, 'dia');
-  push(DATA.meta_ads && DATA.meta_ads.daily, 'dia');
+  push(DATA.meta_b2b && DATA.meta_b2b.daily, 'dia');
+  push(DATA.meta_ecom && DATA.meta_ecom.daily, 'dia');
   push(DATA.atendimento && DATA.atendimento.msgs_daily, 'dia');
   push(DATA.crm && DATA.crm.deals_minimal, 'criado_em');
   push(DATA.crm && DATA.crm.losses_daily, 'criado');
@@ -391,7 +626,9 @@ function syncFilterUI() {
 function onDateInput() {
   const s = document.getElementById('f-start').value;
   const e = document.getElementById('f-end').value;
-  if (!s || !e) return;
+  // Campo apagado: restaura a UI para o filtro APLICADO — senão o input
+  // ficaria vazio com os dados ainda filtrados pelo valor antigo.
+  if (!s || !e) { syncFilterUI(); return; }
   FILTER.start = s <= e ? s : e;
   FILTER.end = s <= e ? e : s;
   FILTER.preset = 'custom';
@@ -407,48 +644,57 @@ function buildFilterUI() {
 }
 
 /* ============================================================
-   P1 · VISÃO GERAL
+   B2B · VISÃO GERAL
    ============================================================ */
-function renderVisaoGeral(el) {
+function renderVisaoB2B(el) {
   const L = fdays((DATA.leads || {}).daily);
   const leadsCRM = sum(L, 'total');
   const leadsPagos = sum(L, 'pagos');
-  const campDaily = (DATA.meta_ads || {}).campaign_daily || [];
-  const captP = fdays(campDaily).filter(r => tipoCampanha(r.campanha) === 'captacao');
-  const investCapt = sum(captP, 'gasto');
-  const leadsPlat = sum(fdays((DATA.meta_ads || {}).daily), 'leads_plat');
+  const mbDaily = fdays((DATA.meta_b2b || {}).daily);
+  const invest = sum(mbDaily, 'gasto');
+  const leadsPlat = sum(mbDaily, 'leads_plat');
   const deals = ((DATA.crm || {}).deals_minimal || []).filter(d => inPeriod(d.criado_em));
   const vendas = deals.filter(d => d.ganho).length;
   const perdidos = deals.filter(d => d.perdido).length;
-  const cpl = (investCapt > 0 && leadsPagos > 0) ? investCapt / leadsPagos : null;
+  const cpl = (invest > 0 && leadsPagos > 0) ? invest / leadsPagos : null;
   const cobPct = ((DATA.utm || {}).cobertura || {}).pct;
 
   let html = qualityBanners(true);
 
-  html += '<div class="kpis cols-6">' +
-    kpi('Leads no CRM', fmt.num(leadsCRM), 'criados no período · Pipeline de venda B2B') +
-    kpi('Investimento', fmt.currency(investCapt), 'Meta (captação B2B) · Google: sem integração') +
+  // KPI-herói: CPL (CRM). Demais KPIs menores.
+  html += '<div class="kpis cols-hero-6">' +
     kpi('CPL (CRM)', cpl == null ? null : fmt.currency(cpl),
-      cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true }) +
+      cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true, hero: true }) +
+    kpi('Leads no CRM', fmt.num(leadsCRM), 'criados no período · pipeline B2B') +
+    kpi('Investimento', fmt.currency(invest), 'Meta (frente B2B) · Google: sem integração') +
     kpi('Leads plataforma', fmt.num(leadsPlat), 'reportado pela plataforma (referência)') +
     kpi('Vendas', fmt.num(vendas), 'no período') +
     kpi('Perdidos', fmt.num(perdidos), 'no período') +
     '</div>';
 
-  html += '<div class="note-blue">* <strong>CPL (CRM)</strong> = investimento nas campanhas de captação (formulário de leads) ÷ leads do CRM ' +
+  html += '<div class="note-blue">* <strong>CPL (CRM)</strong> = investimento nas campanhas de leads B2B (meta_b2b) ÷ leads do CRM ' +
     'atribuídos ao tráfego pago via UTM. Só <strong>' + fmt.pct(cobPct, 0) + '</strong> dos leads chegam com UTM — o CPL descreve essa fatia rastreada, não o total. ' +
-    'E-commerce e impulsionamento ficam fora da conta (ver página Institucional & Impulsionamento).</div>';
+    'E-commerce e impulsionamento ficam no painel E-commerce.</div>';
 
   const sL = dailySeries((DATA.leads || {}).daily, ['total']);
-  const sI = dailySeries(captP, ['gasto']);
+  const sI = dailySeries((DATA.meta_b2b || {}).daily, ['gasto']);
+
+  // primeiro dia com dado da frente B2B (nada hardcoded: vem da própria série)
+  const mbAll = (DATA.meta_b2b || {}).daily || [];
+  const mbMin = mbAll.reduce((a, r) => (r.dia && (!a || r.dia < a)) ? r.dia : a, null);
+  const semInvestMsg = mbMin
+    ? 'A campanha de captação B2B começou em ' + fmt.dateFull(mbMin) + ' — amplie o período.'
+    : 'Ainda não há investimento B2B registrado na série.';
 
   html += '<div class="grid-2">' +
     (sL
-      ? chartCard('Leads por dia', 'entradas no pipeline (CRM)', 'ch-vg-leads')
+      ? chartCard('Leads por dia', 'entradas no pipeline (CRM)', 'ch-vg-leads', '',
+        dailyRelief(sL, [{ k: 'total', t: 'Leads', f: fmt.num }]))
       : card('Leads por dia', 'entradas no pipeline (CRM)', emptyDashed('Sem leads no período selecionado.', 'Ajuste o filtro de período no topo.'))) +
     (sI
-      ? chartCard('Investimento por dia', 'gasto Meta Ads da frente (campanhas de captação)', 'ch-vg-invest')
-      : card('Investimento por dia', 'gasto Meta Ads da frente (campanhas de captação)', emptyDashed('Sem investimento de captação no período.', 'A campanha de captação B2B começou em 26/06 — amplie o período.'))) +
+      ? chartCard('Investimento por dia', 'gasto Meta da frente B2B (campanhas de leads)', 'ch-vg-invest', '',
+        dailyRelief(sI, [{ k: 'gasto', t: 'Gasto', f: fmt.currency }]))
+      : card('Investimento por dia', 'gasto Meta da frente B2B (campanhas de leads)', emptyDashed('Sem investimento B2B no período.', semInvestMsg))) +
     '</div>';
 
   const fp = funnelPeriodStages();
@@ -457,10 +703,7 @@ function renderVisaoGeral(el) {
     fp.total ? funnelHtml(fp) : emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
 
   // ----- Leads por origem (utm_source) -----
-  // Atenção: parte dos leads rastreados chega com utm_campaign mas SEM
-  // utm_source — por isso o fallback é "(sem utm_source)", não "(sem UTM)":
-  // a cobertura de UTM (nota azul acima) conta qualquer parâmetro presente.
-  const bySrc = {};
+  const bySrc = Object.create(null);     // utm_source é dado externo
   deals.forEach(d => {
     const s = d.utm_source || '(sem utm_source)';
     if (!bySrc[s]) bySrc[s] = { leads: 0, vendas: 0, perdidos: 0 };
@@ -494,7 +737,7 @@ function renderVisaoGeral(el) {
     '<td class="r">' + fmt.days(r.tempo_1o_atend_dias) + '</td>' +
     '<td class="r">' + fmt.days(r.parado_dias) + '</td></tr>').join('');
   html += card('Qualidade de atendimento por responsável',
-    'estado atual do funil — <strong>não usa o filtro de período</strong> · "1º atendimento" = lead saiu da etapa de entrada · resolução diária',
+    'foto atual do funil — <strong>não usa o filtro de período</strong> · "1º atendimento" = lead saiu da etapa de entrada · resolução diária',
     qualRows
       ? tableWrap([
         { t: 'Responsável' }, { t: 'Leads', r: 1 }, { t: 'Vendas', r: 1 }, { t: 'Perdidos', r: 1 },
@@ -507,20 +750,15 @@ function renderVisaoGeral(el) {
   if (sL) {
     makeChart('ch-vg-leads', {
       type: 'bar',
-      data: {
-        labels: sL.labels,
-        datasets: [{ label: 'Leads', data: sL.data.total, backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom' }]
-      },
+      data: { labels: sL.labels, datasets: [barDs('Leads', sL.data.total, S.mostarda)] },
       options: baseOpts({})
     });
   }
   if (sI) {
+    // Terracota em série densa → linha 2px + relief "Ver tabela" (acima)
     makeChart('ch-vg-invest', {
-      type: 'bar',
-      data: {
-        labels: sI.labels,
-        datasets: [{ label: 'Gasto (R$)', data: sI.data.gasto, backgroundColor: P.teal, borderRadius: 4, borderSkipped: 'bottom' }]
-      },
+      type: 'line',
+      data: { labels: sI.labels, datasets: [lineDs('Gasto (R$)', sI.data.gasto, S.terracota, { fill: true })] },
       options: baseOpts({
         plugins: { tooltip: { callbacks: moneyTooltip() } },
         scales: { y: yMoney() }
@@ -530,7 +768,7 @@ function renderVisaoGeral(el) {
 }
 
 /* ============================================================
-   P2 · FUNIL CRM
+   B2B · FUNIL CRM
    ============================================================ */
 function renderFunilCRM(el) {
   const crm = DATA.crm || {};
@@ -542,7 +780,7 @@ function renderFunilCRM(el) {
 
   // perdas do período — eixo: data de criação do lead (mesmo eixo dos KPIs)
   const lossesP = (crm.losses_daily || []).filter(r => inPeriod(r.criado));
-  const motivos = {};
+  const motivos = Object.create(null);   // motivo é texto livre do CRM
   lossesP.forEach(r => { const m = r.motivo || 'Não informado'; motivos[m] = (motivos[m] || 0) + 1; });
   const motivosArr = Object.entries(motivos).sort((a, b) => b[1] - a[1]);
 
@@ -557,7 +795,7 @@ function renderFunilCRM(el) {
   let html = qualityBanners(false);
 
   html += '<div class="kpis cols-5">' +
-    kpi('Leads no período', fmt.num(deals.length), 'Pipeline de venda B2B') +
+    kpi('Leads no período', fmt.num(deals.length), 'pipeline de venda B2B') +
     kpi('Em andamento', fmt.num(andamento), 'leads vivos no funil') +
     kpi('Vendas', fmt.num(vendas), 'no período') +
     kpi('Perdidos', fmt.num(perdidos), 'no período') +
@@ -569,7 +807,8 @@ function renderFunilCRM(el) {
     'etapa atual dos leads criados no período — etapas de ganho/perda são terminais, não progresso',
     fp.total ? funnelHtml(fp) : emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
 
-  // ----- Motivos de perda (donut) + Leads perdidos (tabela) -----
+  // ----- Motivos de perda (nominal → UMA cor, terracota, rótulo em toda barra)
+  //       + Leads perdidos (tabela) -----
   const LOSS_CAP = 15;
   const lossRows = lossesP.slice().sort((a, b) => {
     const x = a.criado || '', y = b.criado || '';
@@ -587,7 +826,7 @@ function renderFunilCRM(el) {
     'A etapa em que o lead estava ao ser perdido ainda não é exportada pelo ETL — coluna fica "—" até o histórico de etapas ser acumulado.';
   html += '<div class="grid-2">' +
     (motivosArr.length
-      ? chartCard('Motivos de perda', 'leads perdidos no período (por data de criação do lead)', 'ch-crm-motivos')
+      ? chartCard('Motivos de perda', 'leads perdidos no período (por data de criação do lead) · categoria nominal — uma cor só', 'ch-crm-motivos')
       : card('Motivos de perda', 'leads perdidos no período', emptyDashed('Nenhuma perda no período selecionado.'))) +
     card('Leads perdidos', 'detalhe (data de criação do lead)',
       lossRows
@@ -605,84 +844,78 @@ function renderFunilCRM(el) {
     '</div>';
 
   // ----- Tempo na etapa + leads parados (sem dado no resumo atual) -----
+  // Média da base = média de parado_dias PONDERADA por leads de cada
+  // responsável (a linha [0] sozinha só coincidiria com 1 responsável).
+  const qualBase = DATA.qualidade_responsavel || [];
+  const qLeads = qualBase.reduce((a, r) => a + (r.leads || 0), 0);
+  const paradoMedio = qLeads > 0
+    ? qualBase.reduce((a, r) => a + (r.parado_dias || 0) * (r.leads || 0), 0) / qLeads
+    : null;
   html += '<div class="grid-2">' +
     card('Tempo médio na etapa atual', 'dias parados por etapa (leads vivos)',
       emptyDashed('Sem histórico diário de etapas acumulado.',
         'Quando o ETL passar a registrar o histórico de etapas por lead, esta visão é habilitada automaticamente.')) +
     card('Leads parados há mais dias', 'quem precisa de atenção do atendimento',
       emptyDashed('O resumo atual não exporta leads individuais com dias de parada.',
-        'Habilite a exportação de "leads parados" no ETL para ativar esta visão. Média atual da base: ' +
-        fmt.days(((DATA.qualidade_responsavel || [])[0] || {}).parado_dias) + ' parado por lead.')) +
+        'Habilite a exportação de "leads parados" no ETL para ativar esta visão.' +
+        (paradoMedio == null ? '' : ' Média atual da base: ' + fmt.days(paradoMedio) + ' parado por lead.'))) +
     '</div>';
 
-  // ----- Valor em negociação + Perdas por mês × motivo -----
+  // ----- Valor em negociação + Perdas por mês -----
   const lossesAll = crm.losses_daily || [];
   const mesesPerda = Array.from(new Set(lossesAll.map(r => (r.criado || '').slice(0, 7)).filter(Boolean))).sort();
-  const motivosAll = Array.from(new Set(lossesAll.map(r => r.motivo || 'Não informado')));
   html += '<div class="grid-2">' +
     card('Valor em negociação por etapa', 'campo "valor" dos leads vivos no CRM',
       emptyDashed('Nenhum lead vivo com valor preenchido no Kommo.',
         'Preencha o campo "Valor" dos negócios no Kommo para habilitar esta visão (e o ticket médio real).')) +
     (mesesPerda.length
-      ? chartCard('Perdas por mês × motivo', 'toda a série · mês de criação do lead perdido', 'ch-crm-perdas-mes')
-      : card('Perdas por mês × motivo', 'toda a série', emptyDashed('Nenhuma perda registrada ainda.'))) +
+      ? chartCard('Perdas por mês', 'toda a série · mês de criação do lead perdido — detalhe por motivo no gráfico "Motivos de perda"', 'ch-crm-perdas-mes')
+      : card('Perdas por mês', 'toda a série', emptyDashed('Nenhuma perda registrada ainda.'))) +
     '</div>';
 
   el.innerHTML = html;
 
   if (motivosArr.length) {
+    // Nominal → barra horizontal, UMA cor (terracota) + rótulo direto em toda
+    // barra (relief exigida pelo contraste 2,99:1 da terracota).
     makeChart('ch-crm-motivos', {
-      type: 'doughnut',
+      type: 'bar',
       data: {
         labels: motivosArr.map(m => m[0]),
-        datasets: [{
-          data: motivosArr.map(m => m[1]),
-          backgroundColor: motivosArr.map((m, i) => P.redShades[i % P.redShades.length]),
-          borderColor: '#1A120A',
-          borderWidth: 2
-        }]
+        datasets: [barDs('Perdas', motivosArr.map(m => m[1]), S.terracota, { borderSkipped: 'left' })]
       },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        cutout: '62%',
-        plugins: {
-          legend: { display: true, position: 'right', labels: { boxWidth: 14, boxHeight: 14, color: P.soft, padding: 10 } }
+      options: baseOpts({
+        indexAxis: 'y',
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: {
+          x: yCount({ position: 'bottom', grace: '15%', ticks: { maxRotation: 0, minRotation: 0 } }),
+          y: { grid: { display: false }, ticks: { color: P.soft } }
         }
-      }
+      })
     });
   }
   if (mesesPerda.length) {
     const byMes = {};
     lossesAll.forEach(r => {
       const m = (r.criado || '').slice(0, 7);
-      if (!m) return;
-      const mo = r.motivo || 'Não informado';
-      if (!byMes[m]) byMes[m] = {};
-      byMes[m][mo] = (byMes[m][mo] || 0) + 1;
+      if (m) byMes[m] = (byMes[m] || 0) + 1;
     });
     makeChart('ch-crm-perdas-mes', {
       type: 'bar',
       data: {
         labels: mesesPerda.map(mesLabel),
-        datasets: motivosAll.map((mo, i) => ({
-          label: mo,
-          data: mesesPerda.map(m => (byMes[m] || {})[mo] || 0),
-          backgroundColor: P.redShades[i % P.redShades.length],
-          borderRadius: 3,
-          borderSkipped: 'bottom',
-          stack: 'perdas'
-        }))
+        datasets: [barDs('Perdas', mesesPerda.map(m => byMes[m] || 0), S.terracota)]
       },
       options: baseOpts({
-        plugins: { legend: legendTop() },
-        scales: { x: xCat({ stacked: true }), y: yCount({ stacked: true }) }
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: { x: xCat(), y: yCount({ grace: '15%' }) }
       })
     });
   }
 }
 
 /* ============================================================
-   P3 · ATENDIMENTO (página extra da Terrana)
+   B2B · ATENDIMENTO
    ============================================================ */
 function renderAtendimento(el) {
   const at = DATA.atendimento || {};
@@ -733,10 +966,11 @@ function renderAtendimento(el) {
 
   html += '<div class="grid-2">' +
     (msgs
-      ? chartCard('Mensagens por dia', 'recebidas × enviadas no WhatsApp (Kommo)', 'ch-at-msgs')
+      ? chartCard('Mensagens por dia', 'recebidas × enviadas no WhatsApp (Kommo)', 'ch-at-msgs', '',
+        dailyRelief(msgs, [{ k: 'recebidas', t: 'Recebidas', f: fmt.num }, { k: 'enviadas', t: 'Enviadas', f: fmt.num }]))
       : card('Mensagens por dia', 'recebidas × enviadas', emptyDashed('Sem mensagens no período selecionado.'))) +
     (humanas.length
-      ? chartCard('Tempo de resposta humana — distribuição', 'somente respostas de pessoas (≥ 0,5 min) dentro do período', 'ch-at-buckets')
+      ? chartCard('Tempo de resposta humana — distribuição', 'faixas ordinais (rampa âmbar claro→escuro) · somente respostas de pessoas (≥ 0,5 min) no período', 'ch-at-buckets')
       : card('Tempo de resposta humana — distribuição', 'somente respostas de pessoas', emptyDashed('Sem respostas humanas no período.'))) +
     '</div>';
 
@@ -752,21 +986,35 @@ function renderAtendimento(el) {
       data: {
         labels: msgs.labels,
         datasets: [
-          { label: 'Recebidas', data: msgs.data.recebidas, borderColor: P.teal, backgroundColor: 'rgba(49,205,207,.15)', borderWidth: 2, pointRadius: 2, tension: .3 },
-          { label: 'Enviadas', data: msgs.data.enviadas, borderColor: P.blue, backgroundColor: 'rgba(40,116,252,.15)', borderWidth: 2, pointRadius: 2, tension: .3 }
+          lineDs('Recebidas', msgs.data.recebidas, S.mostarda),
+          lineDs('Enviadas', msgs.data.enviadas, S.terracota)
         ]
       },
-      options: baseOpts({ plugins: { legend: legendTop() } })
+      options: baseOpts({
+        plugins: {
+          legend: legendTop(),
+          directLabels: { mode: 'max', format: fmt.num }   // rótulo direto seletivo (pico)
+        }
+      })
     });
   }
   if (humanas.length) {
+    // Ordinal (faixas de tempo) → rampa de UM matiz, valor rotulado em cada barra
     makeChart('ch-at-buckets', {
       type: 'bar',
       data: {
         labels: buckets.map(b => b.label),
-        datasets: [{ label: 'Respostas humanas', data: bucketCounts, backgroundColor: P.amber, borderRadius: 4, borderSkipped: 'bottom' }]
+        datasets: [{
+          label: 'Respostas humanas',
+          data: bucketCounts,
+          backgroundColor: buckets.map((b, i) => amberStep(i, buckets.length)),
+          borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 42
+        }]
       },
-      options: baseOpts({ scales: { x: xCat() } })
+      options: baseOpts({
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: { x: xCat(), y: yCount({ grace: '15%' }) }
+      })
     });
   }
   if (at.msgs_hora && at.msgs_hora.length) {
@@ -775,7 +1023,7 @@ function renderAtendimento(el) {
       type: 'bar',
       data: {
         labels: horas.map(h => String(h.hora).padStart(2, '0') + 'h'),
-        datasets: [{ label: 'Mensagens', data: horas.map(h => h.mensagens), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom' }]
+        datasets: [barDs('Mensagens', horas.map(h => h.mensagens), S.mostarda)]
       },
       options: baseOpts({ scales: { x: xCat({ ticks: { maxTicksLimit: 24 } }) } })
     });
@@ -783,14 +1031,11 @@ function renderAtendimento(el) {
 }
 
 /* ============================================================
-   P4 · META ADS
-   Escopo: campanhas de tráfego (captação + e-commerce). O
-   impulsionamento tem página própria (Institucional).
+   B2B · META ADS — SÓ meta_b2b (campanhas de leads B2B)
    ============================================================ */
-function renderMetaAds(el) {
-  const meta = DATA.meta_ads || {};
-  const campDailyP = fdays(meta.campaign_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
-  const captP = campDailyP.filter(r => tipoCampanha(r.campanha) === 'captacao');
+function renderMetaB2B(el) {
+  const meta = DATA.meta_b2b || {};
+  const campDailyP = fdays(meta.campaign_daily);
 
   const gasto = sum(campDailyP, 'gasto');
   const imp = sum(campDailyP, 'impressoes');
@@ -798,22 +1043,12 @@ function renderMetaAds(el) {
   const ctr = imp > 0 ? cli / imp * 100 : null;
   const cpc = cli > 0 ? gasto / cli : null;
   const leadsPlat = sum(campDailyP, 'leads_plat');
-  const gastoCapt = sum(captP, 'gasto');
-  // Numerador e denominador na MESMA frente: gasto de captação ÷ leads_plat
-  // das campanhas de captação (se o e-commerce um dia reportar leads_plat,
-  // ele não pode diluir o custo/lead da captação).
-  const leadsPlatCapt = sum(captP, 'leads_plat');
-  const custoLeadPlat = leadsPlatCapt > 0 ? gastoCapt / leadsPlatCapt : null;
+  const custoLeadPlat = leadsPlat > 0 ? gasto / leadsPlat : null;
   const target = (DATA.config && DATA.config.cpl_target_meta) || 0;
 
-  // split do período (todas as campanhas, para o banner azul)
-  const splitP = { captacao: 0, ecommerce: 0, impulsionamento: 0, outras: 0 };
-  fdays(meta.campaign_daily).forEach(r => { splitP[tipoCampanha(r.campanha)] += r.gasto || 0; });
-
   let html = qualityBanners(false);
-  html += banner('blue', 'Esta página cobre as campanhas de <strong>tráfego</strong> (captação de leads + e-commerce). ' +
-    'No período: captação <strong>' + fmt.currency(splitP.captacao) + '</strong> · e-commerce <strong>' + fmt.currency(splitP.ecommerce) + '</strong>. ' +
-    'O impulsionamento (' + fmt.currency(splitP.impulsionamento) + ') tem página própria — Institucional &amp; Impulsionamento.');
+  html += banner('blue', 'Esta página cobre <strong>somente as campanhas de leads B2B</strong> (frente meta_b2b). ' +
+    'As campanhas de e-commerce estão no painel E-commerce, e o impulsionamento na página Institucional &amp; Impulsionamento (painel E-commerce).');
 
   html += '<div class="kpis cols-6">' +
     kpi('Gasto', fmt.currency(gasto), 'no período') +
@@ -822,12 +1057,14 @@ function renderMetaAds(el) {
     kpi('CPC', cpc == null ? null : fmt.currency(cpc), 'gasto ÷ cliques') +
     kpi('Leads plataforma', fmt.num(leadsPlat), 'plataforma (referência)') +
     kpi('Custo/lead plat.', custoLeadPlat == null ? null : fmt.currency(custoLeadPlat),
-      (custoLeadPlat == null ? 'sem leads de plataforma na captação no período · ' : 'gasto de captação ÷ leads plat. da captação · ') +
+      (custoLeadPlat == null ? 'sem leads de plataforma no período · ' : 'gasto ÷ leads plat. · ') +
       (target ? 'meta: até ' + fmt.currency(target) : 'meta de CPL não definida'), { teal: true }) +
     '</div>';
 
-  // ----- Tabela CAMPANHAS -----
-  const statusDict = meta.campaign_status || {};
+  // ----- Tabela CAMPANHAS (leads CRM da série via meta.campaigns — foto atual)
+  const statusDict = dict(meta.campaign_status);
+  const crmByCamp = Object.create(null);
+  (meta.campaigns || []).forEach(c => { crmByCamp[c.campanha] = c.leads_crm; });
   const byCamp = aggBy(campDailyP, r => r.campanha, ['gasto', 'impressoes', 'cliques', 'leads_plat']);
   const campRows = Object.keys(byCamp)
     .map(k => ({ nome: k, v: byCamp[k] }))
@@ -838,6 +1075,7 @@ function renderMetaAds(el) {
     const rctr = v.impressoes > 0 ? v.cliques / v.impressoes * 100 : null;
     const rcpc = v.cliques > 0 ? v.gasto / v.cliques : null;
     const rcl = v.leads_plat > 0 ? v.gasto / v.leads_plat : null;
+    const lcrm = crmByCamp[r.nome];
     return '<tr><td>' + statusBadge(statusDict[r.nome]) + '</td>' +
       '<td class="name">' + esc(r.nome) + '</td>' +
       '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
@@ -846,18 +1084,19 @@ function renderMetaAds(el) {
       '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
       '<td class="r">' + (rcpc == null ? '—' : fmt.currency(rcpc)) + '</td>' +
       '<td class="r">' + fmt.num(v.leads_plat) + '</td>' +
-      '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td></tr>';
+      '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td>' +
+      '<td class="r">' + (lcrm == null ? '—' : fmt.num(lcrm)) + '</td></tr>';
   }).join('');
-  html += card('Campanhas', 'status real via API · métricas do período filtrado',
+  html += card('Campanhas', 'status real via API · métricas do período filtrado · Leads CRM* = leads rastreados por UTM em toda a série (foto atual)',
     campBody
       ? tableWrap([
         { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
-        { t: 'CTR', r: 1 }, { t: 'CPC', r: 1 }, { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }
+        { t: 'CTR', r: 1 }, { t: 'CPC', r: 1 }, { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }, { t: 'Leads CRM*', r: 1 }
       ], campBody)
-      : emptyDashed('Nenhuma campanha de tráfego com gasto no período.', 'Ajuste o filtro de período no topo.'));
+      : emptyDashed('Nenhuma campanha de leads B2B com gasto no período.', 'Ajuste o filtro de período no topo.'));
 
   // ----- Tabela CONJUNTOS -----
-  const adsetP = fdays(meta.adset_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const adsetP = fdays(meta.adset_daily);
   const byAdset = aggBy(adsetP, r => r.campanha + '|||' + r.conjunto, ['gasto', 'cliques', 'leads_plat']);
   const adsetRows = Object.keys(byAdset)
     .map(k => ({ campanha: byAdset[k].__row.campanha, conjunto: byAdset[k].__row.conjunto, v: byAdset[k] }))
@@ -868,7 +1107,6 @@ function renderMetaAds(el) {
     return '<tr><td class="name">' + esc(r.conjunto) + '</td>' +
       '<td class="dim">' + esc(r.campanha) + '</td>' +
       '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
-      '<td class="r">—</td>' +
       '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
       '<td class="r">' + fmt.num(r.v.leads_plat) + '</td>' +
       '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td>' +
@@ -877,17 +1115,17 @@ function renderMetaAds(el) {
   html += card('Conjuntos de anúncios', 'agrupado por campanha + conjunto (dimensão real da linha da API)',
     adsetBody
       ? tableWrap([
-        { t: 'Conjunto' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Conjunto' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
         { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }, { t: 'Qualidade' }
       ], adsetBody) +
-      '<div class="note">Impressões por conjunto ainda não são exportadas pelo ETL — coluna fica "—". ' +
+      '<div class="note">Impressões por conjunto ainda não são exportadas pelo ETL. ' +
       'A régua Bom/Ruim é habilitada quando a meta de custo/lead for definida na configuração.</div>'
       : emptyDashed('Nenhum conjunto com gasto no período.'));
 
   // ----- Tabela ANÚNCIOS -----
-  const metaCreat = {};
+  const metaCreat = Object.create(null);
   (meta.creatives || []).forEach(c => { metaCreat[c.anuncio + '|||' + c.campanha] = c; });
-  const creatP = fdays(meta.creatives_daily).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  const creatP = fdays(meta.creatives_daily);
   const byCreat = aggBy(creatP, r => r.anuncio + '|||' + r.campanha, ['gasto', 'cliques', 'leads_plat']);
   const ADS_CAP = 25;
   const creatRows = Object.keys(byCreat)
@@ -902,8 +1140,9 @@ function renderMetaAds(el) {
       ? '<img class="thumb" src="' + esc(a.thumbnail) + '" alt="" loading="lazy" referrerpolicy="no-referrer" ' +
       'onerror="this.style.display=&#39;none&#39;;this.nextElementSibling.style.display=&#39;flex&#39;"><div class="thumb-fb">▦</div>'
       : '<div class="thumb-fb" style="display:flex">▦</div>';
-    const nome = a.permalink
-      ? '<a href="' + esc(a.permalink) + '" target="_blank" rel="noopener">' + esc(anuncio) + ' 🔗</a>'
+    const plink = safeHttpUrl(a.permalink);
+    const nome = plink
+      ? '<a href="' + esc(plink) + '" target="_blank" rel="noopener">' + esc(anuncio) + ' 🔗</a>'
       : '<span class="name">' + esc(anuncio || '(sem nome)') + '</span>';
     return '<tr><td><div class="cell-creative">' + thumb + nome + '</div></td>' +
       '<td class="dim">' + esc(a.conjunto || '—') + '</td>' +
@@ -913,57 +1152,58 @@ function renderMetaAds(el) {
       '<td class="r">' + (rcl == null ? '—' : fmt.currency(rcl)) + '</td>' +
       '<td>' + qualityBadge(rcl, r.v.leads_plat) + '</td></tr>';
   }).join('');
-  html += card('Anúncios', 'criativo × campanha × conjunto · clique no nome para ver o anúncio',
+  html += card('Anúncios', 'criativo × campanha · clique no nome para ver o anúncio',
     creatBody
       ? tableWrap([
-        { t: 'Anúncio' }, { t: 'Conjunto' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Anúncio' }, { t: 'Conjunto principal' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
         { t: 'Leads plataforma', r: 1 }, { t: 'Custo/lead plat.', r: 1 }, { t: 'Qualidade' }
       ], creatBody) +
+      '<div class="note">Um anúncio pode rodar em mais de um conjunto — a coluna mostra o conjunto principal ' +
+      'do anúncio na série (o ETL ainda não exporta o conjunto no diário por criativo). ' +
+      'O gasto por conjunto correto está na tabela Conjuntos acima.</div>' +
       (creatRows.length > ADS_CAP
         ? '<div class="note">Mostrando os ' + ADS_CAP + ' anúncios com maior gasto de ' + fmt.num(creatRows.length) + ' no período.</div>'
         : '')
       : emptyDashed('Nenhum anúncio com gasto no período.'));
 
-  // ----- Combo mensal: Investimento × Leads CRM -----
-  const trafDaily = (meta.campaign_daily || []).filter(r => tipoCampanha(r.campanha) !== 'impulsionamento');
+  // ----- Mensal: Investimento e Leads CRM — SMALL MULTIPLES (sem eixo duplo)
   const gastoMes = {};
-  trafDaily.forEach(r => { const m = (r.dia || '').slice(0, 7); if (m) gastoMes[m] = (gastoMes[m] || 0) + (r.gasto || 0); });
+  (meta.monthly || []).forEach(r => { gastoMes[r.mes] = r.gasto || 0; });
   const leadsMes = {};
   ((DATA.leads || {}).monthly || []).forEach(r => { leadsMes[r.mes] = r.total; });
   const mesesCombo = Array.from(new Set(Object.keys(gastoMes).concat(Object.keys(leadsMes)))).sort();
   html += (mesesCombo.length
-    ? chartCard('Investimento × Leads CRM (mensal)',
-      'barras = gasto Meta (tráfego, sem impulsionamento) · linha = leads do pipeline no CRM · série mensal completa — não usa o filtro',
-      'ch-meta-mensal', 'tall')
-    : card('Investimento × Leads CRM (mensal)', '', emptyDashed('Sem série mensal ainda.')));
+    ? multiChartCard('Investimento × Leads CRM (mensal)',
+      'dois gráficos empilhados no mesmo eixo X (sem eixo duplo) · acima: gasto Meta B2B · abaixo: leads do pipeline no CRM · série mensal completa — não usa o filtro',
+      'ch-meta-mensal-gasto', 'ch-meta-mensal-leads')
+    : card('Investimento × Leads CRM (mensal)', 'série mensal completa', emptyDashed('Sem série mensal ainda.')));
 
   el.innerHTML = html;
 
   if (mesesCombo.length) {
-    makeChart('ch-meta-mensal', {
+    const labels = mesesCombo.map(mesLabel);
+    makeChart('ch-meta-mensal-gasto', {
       type: 'bar',
-      data: {
-        labels: mesesCombo.map(mesLabel),
-        datasets: [
-          { type: 'bar', label: 'Gasto (R$)', data: mesesCombo.map(m => gastoMes[m] || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', yAxisID: 'y', order: 2 },
-          { type: 'line', label: 'Leads CRM', data: mesesCombo.map(m => leadsMes[m] != null ? leadsMes[m] : null), borderColor: P.teal, backgroundColor: P.teal, borderWidth: 2, pointRadius: 4, tension: .3, spanGaps: false, yAxisID: 'y1', order: 1 }
-        ]
-      },
+      data: { labels, datasets: [barDs('Gasto (R$)', mesesCombo.map(m => gastoMes[m] || 0), S.terracota)] },
       options: baseOpts({
         plugins: {
-          legend: legendTop(),
-          tooltip: {
-            callbacks: {
-              label: ctx => ctx.dataset.yAxisID === 'y'
-                ? ctx.dataset.label + ': ' + fmt.currency(ctx.parsed.y)
-                : ctx.dataset.label + ': ' + (ctx.parsed.y == null ? 'sem cobertura CRM' : fmt.num(ctx.parsed.y))
-            }
-          }
+          tooltip: { callbacks: moneyTooltip() },
+          directLabels: { mode: 'all', format: fmt.moneyShort }
         },
         scales: {
+          x: xCat({ ticks: { display: false } }),
+          y: lockYWidth(yMoney({ grace: '20%' }), 68)
+        }
+      })
+    });
+    makeChart('ch-meta-mensal-leads', {
+      type: 'bar',
+      data: { labels, datasets: [barDs('Leads CRM', mesesCombo.map(m => leadsMes[m] || 0), S.mostarda)] },
+      options: baseOpts({
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: {
           x: xCat(),
-          y: yMoney({ position: 'left' }),
-          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: P.teal, precision: 0 } }
+          y: lockYWidth(yCount({ grace: '20%' }), 68)
         }
       })
     });
@@ -971,7 +1211,7 @@ function renderMetaAds(el) {
 }
 
 /* ============================================================
-   P5 · GOOGLE ADS (integração pendente — estado vazio da spec)
+   B2B · GOOGLE ADS (integração pendente — estado vazio)
    ============================================================ */
 function renderGoogleAds(el) {
   const g = DATA.google_ads || {};
@@ -997,245 +1237,11 @@ function renderGoogleAds(el) {
 }
 
 /* ============================================================
-   P6 · INSTITUCIONAL & IMPULSIONAMENTO
+   B2B · EVOLUÇÃO MENSAL
    ============================================================ */
-function renderInstitucional(el) {
-  const inst = DATA.institucional || {};
-  const IM = (inst.monthly || []).filter(r => monthInPeriod(r.mes));
-  const gasto = sum(IM, 'gasto');
-  const imp = sum(IM, 'impressoes');
-  const eng = sum(IM, 'engajamento');
-  const views = sum(IM, 'video_views');
-  const cpm = imp > 0 ? gasto / imp * 1000 : null;
-  const cpe = eng > 0 ? gasto / eng : null;
-  const hasPeriod = IM.length > 0;
-
-  let html = qualityBanners(false);
-  html += banner('blue', 'As campanhas de impulsionamento são da <strong>conta inteira</strong> do Instagram/Facebook — não são específicas da frente B2B. ' +
-    'Dados com granularidade <strong>mensal</strong>: o filtro de período considera os meses selecionados inteiros. ' +
-    'Sem métrica de alcance de propósito: <strong>alcance não é aditivo</strong> (somar alcances diários infla o número) — usamos impressões.');
-
-  html += '<div class="kpis cols-6">' +
-    kpi('Investimento', hasPeriod ? fmt.currency(gasto) : null, 'impulsionamento nos meses do período') +
-    kpi('Impressões', hasPeriod ? fmt.num(imp) : null, 'soma dos meses do período') +
-    kpi('Engajamento', hasPeriod ? fmt.num(eng) : null, 'interações com posts') +
-    kpi('Views de vídeo', hasPeriod ? fmt.num(views) : null, 'nos meses do período') +
-    kpi('Custo / 1.000 impressões', cpm == null ? null : fmt.currency(cpm), 'no lugar de custo/alcance (alcance não é aditivo)', { teal: true }) +
-    kpi('Custo / engajamento', cpe == null ? null : fmt.currency(cpe), 'gasto ÷ interações', { teal: true }) +
-    '</div>';
-
-  // split de gasto (toda a série)
-  const split = inst.split_gasto || {};
-  const splitPairs = [
-    ['Captação (leads B2B)', split.captacao || 0, P.teal],
-    ['E-commerce', split.ecommerce || 0, P.blue],
-    ['Impulsionamento', split.impulsionamento || 0, P.amber]
-  ].concat(split.outras ? [['Outras', split.outras, P.muted]] : []);
-
-  html += '<div class="grid-2">' +
-    chartCard('Divisão do investimento Meta', 'conta inteira, classificada pelo nome da campanha · toda a série — não usa o filtro', 'ch-inst-split') +
-    (IM.length
-      ? chartCard('Investimento × Engajamento (mensal)', 'barras = gasto impulsionamento · linha = engajamento', 'ch-inst-mensal')
-      : card('Investimento × Engajamento (mensal)', '', emptyDashed('Sem meses de impulsionamento no período selecionado.', 'Amplie o período no topo.'))) +
-    '</div>';
-
-  // tabela campanhas institucionais (totais da série — sem fonte diária)
-  const rows = (inst.campaigns || []).slice().sort((a, b) => (b.gasto || 0) - (a.gasto || 0)).map(c => {
-    const rcpe = (c.engajamento || 0) > 0 ? (c.gasto || 0) / c.engajamento : null;
-    return '<tr><td>' + statusBadge(c.status) + '</td>' +
-      '<td class="name">' + esc(c.campanha) + '</td>' +
-      '<td class="r">' + fmt.currency(c.gasto) + '</td>' +
-      '<td class="r">' + fmt.num(c.impressoes) + '</td>' +
-      '<td class="r">' + fmt.num(c.engajamento) + '</td>' +
-      '<td class="r">' + fmt.num(c.video_views) + '</td>' +
-      '<td class="r">' + (rcpe == null ? '—' : fmt.currency(rcpe)) + '</td></tr>';
-  }).join('');
-  html += card('Campanhas institucionais',
-    'status real via API · totais de toda a série (a API não expõe o diário por campanha de impulsionamento no resumo atual) — <strong>não usa o filtro de período</strong>',
-    rows
-      ? tableWrap([
-        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
-        { t: 'Engajamento', r: 1 }, { t: 'Views', r: 1 }, { t: 'Custo/engaj.', r: 1 }
-      ], rows)
-      : emptyDashed('Nenhuma campanha de impulsionamento registrada.'));
-
-  el.innerHTML = html;
-
-  makeChart('ch-inst-split', {
-    type: 'doughnut',
-    data: {
-      labels: splitPairs.map(p2 => p2[0]),
-      datasets: [{
-        data: splitPairs.map(p2 => p2[1]),
-        backgroundColor: splitPairs.map(p2 => p2[2]),
-        borderColor: '#1A120A',
-        borderWidth: 2
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      cutout: '62%',
-      plugins: {
-        legend: { display: true, position: 'right', labels: { boxWidth: 14, boxHeight: 14, color: P.soft, padding: 10 } },
-        tooltip: { callbacks: { label: ctx => ctx.label + ': ' + fmt.currency(ctx.parsed) } }
-      }
-    }
-  });
-
-  if (IM.length) {
-    makeChart('ch-inst-mensal', {
-      type: 'bar',
-      data: {
-        labels: IM.map(r => mesLabel(r.mes)),
-        datasets: [
-          { type: 'bar', label: 'Gasto (R$)', data: IM.map(r => r.gasto || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', yAxisID: 'y', order: 2 },
-          { type: 'line', label: 'Engajamento', data: IM.map(r => r.engajamento || 0), borderColor: P.teal, backgroundColor: P.teal, borderWidth: 2, pointRadius: 4, tension: .3, yAxisID: 'y1', order: 1 }
-        ]
-      },
-      options: baseOpts({
-        plugins: {
-          legend: legendTop(),
-          tooltip: {
-            callbacks: {
-              label: ctx => ctx.dataset.yAxisID === 'y'
-                ? ctx.dataset.label + ': ' + fmt.currency(ctx.parsed.y)
-                : ctx.dataset.label + ': ' + fmt.num(ctx.parsed.y)
-            }
-          }
-        },
-        scales: {
-          x: xCat(),
-          y: yMoney({ position: 'left' }),
-          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: P.teal, callback: v => Number(v).toLocaleString('pt-BR') } }
-        }
-      })
-    });
-  }
-}
-
-/* ============================================================
-   P7 · PÚBLICO (breakdowns mensais da Meta)
-   ============================================================ */
-function stackByAgeGender(rows, field) {
-  const ages = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+', 'Unknown'];
-  const g = { female: {}, male: {}, unknown: {} };
-  let total = 0;
-  (rows || []).forEach(r => {
-    if (!monthInPeriod(r.mes)) return;
-    const gg = g[r.genero] || g.unknown;
-    gg[r.idade] = (gg[r.idade] || 0) + (r[field] || 0);
-    total += r[field] || 0;
-  });
-  return {
-    ages, total,
-    fem: ages.map(a => g.female[a] || 0),
-    mas: ages.map(a => g.male[a] || 0),
-    unk: ages.map(a => g.unknown[a] || 0)
-  };
-}
-function renderPublico(el) {
-  const pub = DATA.publico || {};
-  let html = qualityBanners(false);
-  html += banner('blue', 'Dados da Meta com granularidade <strong>mensal</strong> — o filtro de período considera os <strong>meses selecionados inteiros</strong>. Conta inteira (todas as campanhas Meta).');
-
-  const inv = stackByAgeGender(pub.age_gender, 'gasto');
-  const lds = stackByAgeGender(pub.age_gender, 'leads_plat');
-
-  // posicionamentos
-  const placM = (pub.placement || []).filter(r => monthInPeriod(r.mes));
-  const byPlace = aggBy(placM, r => (r.plataforma || '?') + ' · ' + (r.posicao || '?'), ['gasto', 'impressoes', 'cliques', 'leads_plat']);
-  const placeRows = Object.keys(byPlace)
-    .map(k => ({ k, v: byPlace[k] }))
-    .filter(r => r.v.gasto > 0)
-    .sort((a, b) => b.v.gasto - a.v.gasto)
-    .map(r => {
-      const rctr = r.v.impressoes > 0 ? r.v.cliques / r.v.impressoes * 100 : null;
-      return '<tr><td class="name" style="text-transform:lowercase">' + esc(r.k) + '</td>' +
-        '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
-        '<td class="r">' + fmt.num(r.v.impressoes) + '</td>' +
-        '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
-        '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
-        '<td class="r">' + fmt.num(r.v.leads_plat) + '</td></tr>';
-    }).join('');
-
-  // regiões
-  const regM = (pub.region || []).filter(r => monthInPeriod(r.mes));
-  const byReg = aggBy(regM, r => (r.regiao || '(sem região)').replace(' (state)', ''), ['gasto']);
-  const topReg = Object.keys(byReg)
-    .map(k => ({ k, gasto: byReg[k].gasto }))
-    .sort((a, b) => b.gasto - a.gasto)
-    .slice(0, 12);
-
-  html += '<div class="grid-2">' +
-    (inv.total > 0
-      ? chartCard('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', 'ch-pub-inv')
-      : card('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', emptyDashed('Sem dados de público nos meses do período.', 'Amplie o período no topo.'))) +
-    (lds.total > 0
-      ? chartCard('Leads Plataforma por idade e gênero', 'quem responde aos anúncios (número da plataforma — referência)', 'ch-pub-leads')
-      : card('Leads Plataforma por idade e gênero', 'quem responde aos anúncios', emptyDashed('Sem leads de plataforma nos meses do período.', 'A campanha de captação começou em 26/06 — amplie o período.'))) +
-    '</div>';
-
-  html += '<div class="grid-2">' +
-    card('Posicionamentos', 'feed, stories, reels — onde os anúncios rodam',
-      placeRows
-        ? tableWrap([
-          { t: 'Posicionamento' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
-          { t: 'Cliques', r: 1 }, { t: 'CTR', r: 1 }, { t: 'Leads plataforma', r: 1 }
-        ], placeRows)
-        : emptyDashed('Sem dados de posicionamento nos meses do período.')) +
-    (topReg.length
-      ? chartCard('Regiões', 'top 12 por investimento', 'ch-pub-reg', 'tall')
-      : card('Regiões', 'top 12 por investimento', emptyDashed('Sem dados de região nos meses do período.'))) +
-    '</div>';
-
-  el.innerHTML = html;
-
-  // Spec P7: eixo monetário com milhar pt-BR ("1.200"), sem prefixo R$ —
-  // formato específico desta página (o tooltip continua em R$).
-  const milharTick = v => Number(v).toLocaleString('pt-BR');
-  const stackedOpts = moneyAxis => baseOpts({
-    plugins: deepMerge({ legend: legendTop() }, moneyAxis ? { tooltip: { callbacks: moneyTooltip() } } : {}),
-    scales: {
-      x: xCat({ stacked: true, grid: { color: P.grid, display: true, drawTicks: false } }),
-      y: moneyAxis ? yCount({ stacked: true, ticks: { callback: milharTick } }) : yCount({ stacked: true })
-    }
-  });
-  const genderSets = d => [
-    { label: 'Feminino', data: d.fem, backgroundColor: P.teal, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' },
-    { label: 'Masculino', data: d.mas, backgroundColor: P.blue, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' },
-    { label: 'Não informado', data: d.unk, backgroundColor: P.muted, borderRadius: 3, borderSkipped: 'bottom', stack: 'g' }
-  ];
-  if (inv.total > 0) {
-    makeChart('ch-pub-inv', { type: 'bar', data: { labels: inv.ages, datasets: genderSets(inv) }, options: stackedOpts(true) });
-  }
-  if (lds.total > 0) {
-    makeChart('ch-pub-leads', { type: 'bar', data: { labels: lds.ages, datasets: genderSets(lds) }, options: stackedOpts(false) });
-  }
-  if (topReg.length) {
-    makeChart('ch-pub-reg', {
-      type: 'bar',
-      data: {
-        labels: topReg.map(r => r.k),
-        datasets: [{ label: 'Gasto (R$)', data: topReg.map(r => r.gasto), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'left' }]
-      },
-      options: baseOpts({
-        indexAxis: 'y',
-        plugins: { tooltip: { callbacks: moneyTooltip() } },
-        scales: {
-          x: yCount({ position: 'bottom', ticks: { maxRotation: 0, minRotation: 0, callback: milharTick } }),
-          y: { grid: { display: false }, ticks: { color: P.soft } }
-        }
-      })
-    });
-  }
-}
-
-/* ============================================================
-   P8 · EVOLUÇÃO MENSAL
-   ============================================================ */
-function renderEvolucao(el) {
+function renderEvolucaoB2B(el) {
   const leadsM = (DATA.leads || {}).monthly || [];
-  const metaM = (DATA.meta_ads || {}).monthly || [];
+  const metaM = (DATA.meta_b2b || {}).monthly || [];
   const wonM = {};
   ((DATA.crm || {}).monthly_won || []).forEach(r => { wonM[r.mes] = r.ganhos; });
   const lostM = {};
@@ -1245,38 +1251,29 @@ function renderEvolucao(el) {
     if (m) lostM[m] = (lostM[m] || 0) + 1;
   });
   const mesesVP = Array.from(new Set(Object.keys(wonM).concat(Object.keys(lostM)))).sort();
-
-  // custo/lead plataforma por mês: gasto de captação ÷ leads_plat DA CAPTAÇÃO
-  // no mês (o mensal da conta inteira não pode diluir o denominador)
-  const captMes = {}, leadsPlatCaptMes = {};
-  ((DATA.meta_ads || {}).campaign_daily || []).forEach(r => {
-    if (tipoCampanha(r.campanha) !== 'captacao') return;
-    const m = (r.dia || '').slice(0, 7);
-    if (!m) return;
-    captMes[m] = (captMes[m] || 0) + (r.gasto || 0);
-    leadsPlatCaptMes[m] = (leadsPlatCaptMes[m] || 0) + (r.leads_plat || 0);
-  });
-  const cplM = metaM.map(r => (leadsPlatCaptMes[r.mes] > 0 && captMes[r.mes]) ? captMes[r.mes] / leadsPlatCaptMes[r.mes] : null);
+  const cplM = metaM.map(r => (r.leads_plat > 0 && r.gasto) ? r.gasto / r.leads_plat : null);
 
   let html = qualityBanners(false);
-  html += '<div class="note-blue">Visão mensal completa — <strong>não usa o filtro de período do topo</strong>. Vendas e perdas contadas pelo mês de criação do lead.</div>';
+  html += '<div class="note-blue">Visão mensal completa da frente B2B — <strong>não usa o filtro de período do topo</strong>. ' +
+    'Vendas contadas pelo mês de fechamento (agregado do CRM); perdas pelo mês de criação do lead — ' +
+    'eixos diferentes até o ETL exportar a data de ganho por lead.</div>';
 
   html += '<div class="grid-2">' +
     (leadsM.length
       ? chartCard('Leads por mês (CRM)', 'entradas no pipeline de venda B2B', 'ch-ev-leads')
-      : card('Leads por mês (CRM)', '', emptyDashed('Sem série mensal de leads ainda.'))) +
+      : card('Leads por mês (CRM)', 'entradas no pipeline', emptyDashed('Sem série mensal de leads ainda.'))) +
     (metaM.length
-      ? chartCard('Investimento por mês (Meta)', 'conta Meta inteira (captação + e-commerce + impulsionamento)', 'ch-ev-invest')
-      : card('Investimento por mês (Meta)', '', emptyDashed('Sem série mensal de investimento ainda.'))) +
+      ? chartCard('Investimento por mês (Meta B2B)', 'gasto das campanhas de leads B2B (meta_b2b)', 'ch-ev-invest')
+      : card('Investimento por mês (Meta B2B)', 'gasto da frente', emptyDashed('Sem série mensal de investimento ainda.'))) +
     '</div>';
 
   html += '<div class="grid-2">' +
     (mesesVP.length
-      ? chartCard('Vendas × Perdas por mês', 'pelo mês de criação do lead (CRM — fonte de verdade)', 'ch-ev-vp')
-      : card('Vendas × Perdas por mês', '', emptyDashed('Nenhuma venda ou perda registrada ainda.'))) +
+      ? chartCard('Vendas × Perdas por mês', 'vendas pelo mês de fechamento · perdas pelo mês de criação do lead (CRM — fonte de verdade) · verde/vermelho = status de ganho/perda', 'ch-ev-vp')
+      : card('Vendas × Perdas por mês', 'CRM — fonte de verdade', emptyDashed('Nenhuma venda ou perda registrada ainda.'))) +
     (metaM.length
-      ? chartCard('Custo/Lead Plat. por mês', 'gasto de captação ÷ leads reportados pela plataforma (referência)', 'ch-ev-cpl')
-      : card('Custo/Lead Plat. por mês', '', emptyDashed('Sem série mensal ainda.'))) +
+      ? chartCard('Custo/Lead Plat. por mês', 'gasto B2B ÷ leads reportados pela plataforma (referência)', 'ch-ev-cpl')
+      : card('Custo/Lead Plat. por mês', 'referência da plataforma', emptyDashed('Sem série mensal ainda.'))) +
     '</div>';
 
   el.innerHTML = html;
@@ -1286,9 +1283,12 @@ function renderEvolucao(el) {
       type: 'bar',
       data: {
         labels: leadsM.map(r => mesLabel(r.mes)),
-        datasets: [{ label: 'Leads', data: leadsM.map(r => r.total || 0), backgroundColor: P.blue, borderRadius: 4, borderSkipped: 'bottom', barPercentage: .65 }]
+        datasets: [barDs('Leads', leadsM.map(r => r.total || 0), S.mostarda)]
       },
-      options: baseOpts({ scales: { x: xCat() } })
+      options: baseOpts({
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: { x: xCat(), y: yCount({ grace: '15%' }) }
+      })
     });
   }
   if (metaM.length) {
@@ -1296,11 +1296,14 @@ function renderEvolucao(el) {
       type: 'bar',
       data: {
         labels: metaM.map(r => mesLabel(r.mes)),
-        datasets: [{ label: 'Gasto (R$)', data: metaM.map(r => r.gasto || 0), backgroundColor: P.teal, borderRadius: 4, borderSkipped: 'bottom', barPercentage: .65 }]
+        datasets: [barDs('Gasto (R$)', metaM.map(r => r.gasto || 0), S.terracota)]
       },
       options: baseOpts({
-        plugins: { tooltip: { callbacks: moneyTooltip() } },
-        scales: { x: xCat(), y: yMoney() }
+        plugins: {
+          tooltip: { callbacks: moneyTooltip() },
+          directLabels: { mode: 'all', format: fmt.moneyShort }
+        },
+        scales: { x: xCat(), y: yMoney({ grace: '20%' }) }
       })
     });
   }
@@ -1310,13 +1313,16 @@ function renderEvolucao(el) {
       data: {
         labels: mesesVP.map(mesLabel),
         datasets: [
-          { label: 'Vendas', data: mesesVP.map(m => wonM[m] || 0), backgroundColor: P.green, borderRadius: 4, borderSkipped: 'bottom' },
-          { label: 'Perdas', data: mesesVP.map(m => lostM[m] || 0), backgroundColor: P.red, borderRadius: 4, borderSkipped: 'bottom' }
+          barDs('Vendas', mesesVP.map(m => wonM[m] || 0), ST.green),
+          barDs('Perdas', mesesVP.map(m => lostM[m] || 0), ST.red)
         ]
       },
       options: baseOpts({
-        plugins: { legend: legendTop() },
-        scales: { x: xCat() }
+        plugins: {
+          legend: legendTop(),
+          directLabels: { mode: 'all', format: fmt.num }
+        },
+        scales: { x: xCat(), y: yCount({ grace: '15%' }) }
       })
     });
   }
@@ -1325,26 +1331,23 @@ function renderEvolucao(el) {
       type: 'line',
       data: {
         labels: metaM.map(r => mesLabel(r.mes)),
-        datasets: [{
-          label: 'Custo/lead plat.', data: cplM,
-          borderColor: P.amber, backgroundColor: P.amber,
-          borderWidth: 2, pointRadius: 5, tension: .3, spanGaps: false
-        }]
+        datasets: [lineDs('Custo/lead plat.', cplM, S.oliva, { pointRadius: 4, spanGaps: false })]
       },
       options: baseOpts({
         plugins: {
           tooltip: {
             callbacks: { label: ctx => ctx.parsed.y == null ? 'sem leads de plataforma no mês' : 'Custo/lead plat.: ' + fmt.currency(ctx.parsed.y) }
-          }
+          },
+          directLabels: { mode: 'all', format: fmt.currency }
         },
-        scales: { x: xCat(), y: yMoney() }
+        scales: { x: xCat(), y: yMoney({ grace: '20%' }) }
       })
     });
   }
 }
 
 /* ============================================================
-   P9 · RASTREAMENTO (UTM) — página extra da Terrana
+   B2B · RASTREAMENTO (UTM)
    ============================================================ */
 function renderUTM(el) {
   const utm = DATA.utm || {};
@@ -1397,6 +1400,593 @@ function renderUTM(el) {
 }
 
 /* ============================================================
+   E-COMMERCE · VISÃO GERAL
+   ============================================================ */
+function renderVisaoEcom(el) {
+  const me = DATA.meta_ecom || {};
+  const dP = fdays(me.daily);
+  const gasto = sum(dP, 'gasto');
+  const cli = sum(dP, 'cliques');
+  const imp = sum(dP, 'impressoes');
+  const ctr = imp > 0 ? cli / imp * 100 : null;
+  const compras = sum(dP, 'compras');
+  const receita = sum(dP, 'valor_compras');
+  const roas = gasto > 0 ? receita / gasto : null;
+  const cpa = compras > 0 ? gasto / compras : null;
+
+  let html = banner('blue', 'Compras e receita vêm do <strong>pixel da Meta</strong> (atribuição da plataforma) — ' +
+    'a loja ainda não envia venda confirmada para cá. Sem CRM nesta frente: a loja não usa o Kommo.');
+
+  // KPI-herói: ROAS
+  html += '<div class="kpis cols-hero-6">' +
+    kpi('ROAS', roas == null ? null : fmt.dec(roas, 2) + '×',
+      roas == null ? 'sem gasto no período' : 'receita ÷ gasto · pixel da Meta', { teal: true, hero: true }) +
+    kpi('Investimento', fmt.currency(gasto), 'campanhas [ECOMMERCE] no período') +
+    kpi('Compras', fmt.num(compras), 'pixel da Meta · no período') +
+    kpi('Receita', fmt.currency(receita), 'pixel da Meta · no período') +
+    kpi('CPA', cpa == null ? null : fmt.currency(cpa), 'gasto ÷ compras') +
+    kpi('Cliques', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
+    '</div>';
+
+  const sG = dailySeries(me.daily, ['gasto']);
+  const sC = dailySeries(me.daily, ['compras', 'valor_compras']);
+
+  html += '<div class="grid-2">' +
+    (sG
+      ? chartCard('Gasto por dia', 'campanhas de e-commerce (Meta)', 'ch-ec-gasto', '',
+        dailyRelief(sG, [{ k: 'gasto', t: 'Gasto', f: fmt.currency }]))
+      : card('Gasto por dia', 'campanhas de e-commerce (Meta)', emptyDashed('Sem gasto no período selecionado.', 'Ajuste o filtro de período no topo.'))) +
+    (sC
+      ? chartCard('Compras por dia', 'pixel da Meta', 'ch-ec-compras', '',
+        dailyRelief(sC, [{ k: 'compras', t: 'Compras', f: fmt.num }, { k: 'valor_compras', t: 'Receita', f: fmt.currency }]))
+      : card('Compras por dia', 'pixel da Meta', emptyDashed('Sem compras no período selecionado.'))) +
+    '</div>';
+
+  el.innerHTML = html;
+
+  if (sG) {
+    // Terracota em série densa → linha 2px + relief "Ver tabela"
+    makeChart('ch-ec-gasto', {
+      type: 'line',
+      data: { labels: sG.labels, datasets: [lineDs('Gasto (R$)', sG.data.gasto, S.terracota, { fill: true })] },
+      options: baseOpts({
+        plugins: { tooltip: { callbacks: moneyTooltip() } },
+        scales: { y: yMoney() }
+      })
+    });
+  }
+  if (sC) {
+    makeChart('ch-ec-compras', {
+      type: 'bar',
+      data: { labels: sC.labels, datasets: [barDs('Compras', sC.data.compras, S.oliva)] },
+      options: baseOpts({})
+    });
+  }
+}
+
+/* ============================================================
+   E-COMMERCE · META ADS — campanhas [ECOMMERCE], compras/receita do pixel
+   ============================================================ */
+function renderMetaEcom(el) {
+  const meta = DATA.meta_ecom || {};
+  const campDailyP = fdays(meta.campaign_daily);
+
+  const gasto = sum(campDailyP, 'gasto');
+  const imp = sum(campDailyP, 'impressoes');
+  const cli = sum(campDailyP, 'cliques');
+  const ctr = imp > 0 ? cli / imp * 100 : null;
+  const compras = sum(campDailyP, 'compras');
+  const receita = sum(campDailyP, 'valor_compras');
+  const roas = gasto > 0 ? receita / gasto : null;
+  const cpa = compras > 0 ? gasto / compras : null;
+
+  let html = banner('blue', 'Campanhas <strong>[ECOMMERCE]</strong> — compras e receita reportadas pelo <strong>pixel da Meta</strong>. ' +
+    'O impulsionamento da conta está na página Institucional &amp; Impulsionamento.');
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Gasto', fmt.currency(gasto), 'no período') +
+    kpi('Impressões', fmt.num(imp), 'no período') +
+    kpi('Cliques', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
+    kpi('Compras', fmt.num(compras), 'pixel da Meta') +
+    kpi('Receita', fmt.currency(receita), 'pixel da Meta') +
+    kpi('ROAS', roas == null ? null : fmt.dec(roas, 2) + '×',
+      cpa == null ? 'receita ÷ gasto' : 'receita ÷ gasto · CPA ' + fmt.currency(cpa), { teal: true }) +
+    '</div>';
+
+  // ----- CAMPANHAS -----
+  const statusDict = dict(meta.campaign_status);
+  const byCamp = aggBy(campDailyP, r => r.campanha, ['gasto', 'impressoes', 'cliques', 'compras', 'valor_compras']);
+  const campRows = Object.keys(byCamp)
+    .map(k => ({ nome: k, v: byCamp[k] }))
+    .filter(r => r.v.gasto > 0 || r.v.compras > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto);
+  const campBody = campRows.map(r => {
+    const v = r.v;
+    const rctr = v.impressoes > 0 ? v.cliques / v.impressoes * 100 : null;
+    const rroas = v.gasto > 0 ? v.valor_compras / v.gasto : null;
+    const rcpa = v.compras > 0 ? v.gasto / v.compras : null;
+    return '<tr><td>' + statusBadge(statusDict[r.nome]) + '</td>' +
+      '<td class="name">' + esc(r.nome) + '</td>' +
+      '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(v.impressoes) + '</td>' +
+      '<td class="r">' + fmt.num(v.cliques) + '</td>' +
+      '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
+      '<td class="r">' + fmt.num(v.compras) + '</td>' +
+      '<td class="r">' + fmt.currency(v.valor_compras) + '</td>' +
+      '<td class="r">' + (rroas == null ? '—' : fmt.dec(rroas, 2) + '×') + '</td>' +
+      '<td class="r">' + (rcpa == null ? '—' : fmt.currency(rcpa)) + '</td></tr>';
+  }).join('');
+  html += card('Campanhas', 'status real via API · métricas do período filtrado · compras e receita do pixel da Meta',
+    campBody
+      ? tableWrap([
+        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'CTR', r: 1 }, { t: 'Compras', r: 1 }, { t: 'Receita', r: 1 }, { t: 'ROAS', r: 1 }, { t: 'CPA', r: 1 }
+      ], campBody)
+      : emptyDashed('Nenhuma campanha de e-commerce com gasto no período.', 'Ajuste o filtro de período no topo.'));
+
+  // ----- CONJUNTOS -----
+  const adsetP = fdays(meta.adset_daily);
+  const byAdset = aggBy(adsetP, r => r.campanha + '|||' + r.conjunto, ['gasto', 'cliques', 'compras', 'valor_compras']);
+  const adsetRows = Object.keys(byAdset)
+    .map(k => ({ campanha: byAdset[k].__row.campanha, conjunto: byAdset[k].__row.conjunto, v: byAdset[k] }))
+    .filter(r => r.v.gasto > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto);
+  const adsetBody = adsetRows.map(r => {
+    const v = r.v;
+    const rroas = v.gasto > 0 ? v.valor_compras / v.gasto : null;
+    const rcpa = v.compras > 0 ? v.gasto / v.compras : null;
+    return '<tr><td class="name">' + esc(r.conjunto) + '</td>' +
+      '<td class="dim">' + esc(r.campanha) + '</td>' +
+      '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(v.cliques) + '</td>' +
+      '<td class="r">' + fmt.num(v.compras) + '</td>' +
+      '<td class="r">' + fmt.currency(v.valor_compras) + '</td>' +
+      '<td class="r">' + (rroas == null ? '—' : fmt.dec(rroas, 2) + '×') + '</td>' +
+      '<td class="r">' + (rcpa == null ? '—' : fmt.currency(rcpa)) + '</td></tr>';
+  }).join('');
+  html += card('Conjuntos de anúncios', 'agrupado por campanha + conjunto · compras e receita do pixel da Meta',
+    adsetBody
+      ? tableWrap([
+        { t: 'Conjunto' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Compras', r: 1 }, { t: 'Receita', r: 1 }, { t: 'ROAS', r: 1 }, { t: 'CPA', r: 1 }
+      ], adsetBody) +
+      '<div class="note">Impressões por conjunto ainda não são exportadas pelo ETL.</div>'
+      : emptyDashed('Nenhum conjunto com gasto no período.'));
+
+  // ----- ANÚNCIOS -----
+  const metaCreat = Object.create(null);
+  (meta.creatives || []).forEach(c => { metaCreat[c.anuncio + '|||' + c.campanha] = c; });
+  const creatP = fdays(meta.creatives_daily);
+  const byCreat = aggBy(creatP, r => r.anuncio + '|||' + r.campanha, ['gasto', 'cliques', 'compras', 'valor_compras']);
+  const ADS_CAP = 25;
+  const creatRows = Object.keys(byCreat)
+    .map(k => ({ k, v: byCreat[k], agg: metaCreat[k] || {} }))
+    .filter(r => r.v.gasto > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto);
+  const creatBody = creatRows.slice(0, ADS_CAP).map(r => {
+    const a = r.agg;
+    const anuncio = r.v.__row.anuncio;
+    const v = r.v;
+    const rroas = v.gasto > 0 ? v.valor_compras / v.gasto : null;
+    const rcpa = v.compras > 0 ? v.gasto / v.compras : null;
+    const thumb = a.thumbnail
+      ? '<img class="thumb" src="' + esc(a.thumbnail) + '" alt="" loading="lazy" referrerpolicy="no-referrer" ' +
+      'onerror="this.style.display=&#39;none&#39;;this.nextElementSibling.style.display=&#39;flex&#39;"><div class="thumb-fb">▦</div>'
+      : '<div class="thumb-fb" style="display:flex">▦</div>';
+    const plink = safeHttpUrl(a.permalink);
+    const nome = plink
+      ? '<a href="' + esc(plink) + '" target="_blank" rel="noopener">' + esc(anuncio) + ' 🔗</a>'
+      : '<span class="name">' + esc(anuncio || '(sem nome)') + '</span>';
+    return '<tr><td><div class="cell-creative">' + thumb + nome + '</div></td>' +
+      '<td class="dim">' + esc(a.conjunto || '—') + '</td>' +
+      '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(v.cliques) + '</td>' +
+      '<td class="r">' + fmt.num(v.compras) + '</td>' +
+      '<td class="r">' + fmt.currency(v.valor_compras) + '</td>' +
+      '<td class="r">' + (rroas == null ? '—' : fmt.dec(rroas, 2) + '×') + '</td>' +
+      '<td class="r">' + (rcpa == null ? '—' : fmt.currency(rcpa)) + '</td></tr>';
+  }).join('');
+  html += card('Anúncios', 'criativo × campanha · clique no nome para ver o anúncio',
+    creatBody
+      ? tableWrap([
+        { t: 'Anúncio' }, { t: 'Conjunto principal' }, { t: 'Gasto', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'Compras', r: 1 }, { t: 'Receita', r: 1 }, { t: 'ROAS', r: 1 }, { t: 'CPA', r: 1 }
+      ], creatBody) +
+      '<div class="note">Um anúncio pode rodar em mais de um conjunto — a coluna mostra o conjunto principal ' +
+      'do anúncio na série (o ETL ainda não exporta o conjunto no diário por criativo). ' +
+      'O gasto por conjunto correto está na tabela Conjuntos acima.</div>' +
+      (creatRows.length > ADS_CAP
+        ? '<div class="note">Mostrando os ' + ADS_CAP + ' anúncios com maior gasto de ' + fmt.num(creatRows.length) + ' no período.</div>'
+        : '')
+      : emptyDashed('Nenhum anúncio com gasto no período.'));
+
+  el.innerHTML = html;
+}
+
+/* ============================================================
+   E-COMMERCE · INSTITUCIONAL & IMPULSIONAMENTO (conta inteira)
+   ============================================================ */
+function renderInstitucional(el) {
+  const inst = DATA.institucional || {};
+  const IM = (inst.monthly || []).filter(r => monthInPeriod(r.mes));
+  const gasto = sum(IM, 'gasto');
+  const imp = sum(IM, 'impressoes');
+  const eng = sum(IM, 'engajamento');
+  const views = sum(IM, 'video_views');
+  const segs = sum(IM, 'seguidores');
+  const cpm = imp > 0 ? gasto / imp * 1000 : null;
+  const cpe = eng > 0 ? gasto / eng : null;
+  const hasPeriod = IM.length > 0;
+
+  let html = '<div class="scope-badge">⚠ conta inteira — não é específico desta frente</div>';
+  html += banner('blue', 'As campanhas de impulsionamento são da <strong>conta inteira</strong> do Instagram/Facebook — não são específicas do e-commerce. ' +
+    'Dados com granularidade <strong>mensal</strong>: o filtro de período considera os meses selecionados inteiros. ' +
+    'Sem métrica de alcance de propósito: <strong>alcance não é aditivo</strong> (somar alcances diários infla o número) — usamos impressões.');
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Investimento', hasPeriod ? fmt.currency(gasto) : null, 'impulsionamento nos meses do período') +
+    kpi('Impressões', hasPeriod ? fmt.num(imp) : null, 'soma dos meses do período') +
+    kpi('Engajamento', hasPeriod ? fmt.num(eng) : null, 'interações com posts') +
+    kpi('Views de vídeo', hasPeriod ? fmt.num(views) : null, 'nos meses do período') +
+    kpi('Novos seguidores', hasPeriod ? fmt.num(segs) : null, 'nos meses do período') +
+    kpi('Custo / engajamento', cpe == null ? null : fmt.currency(cpe),
+      cpm == null ? 'gasto ÷ interações' : 'gasto ÷ interações · CPM ' + fmt.currency(cpm), { teal: true }) +
+    '</div>';
+
+  // split de gasto por frente (toda a série) — novo schema {b2b, ecommerce, inst}
+  // Barras horizontais rotuladas, NÃO donut: com 3 fatias todos os pares se
+  // tocam e o par mostarda↔oliva reprova no validador sob deuteranopia
+  // (ΔE 3,0 < piso 6). Nominal → uma cor só + rótulo em toda barra (relief).
+  const split = inst.split_gasto || {};
+  const splitPairs = [
+    ['B2B Atacado (leads)', split.b2b || 0],
+    ['E-commerce', split.ecommerce || 0],
+    ['Institucional (impulsionamento)', split.inst || 0]
+  ];
+  const splitShort = ['B2B Atacado', 'E-commerce', 'Institucional'];
+  const splitTotal = splitPairs.reduce((a, p2) => a + p2[1], 0);
+  const splitLegend = '<div class="split-legend">' + splitPairs.map(p2 =>
+    '<div class="split-row">' +
+    '<span class="lb">' + esc(p2[0]) + '</span>' +
+    '<span class="vl">' + fmt.currency(p2[1]) + (splitTotal > 0 ? ' · ' + fmt.pct(p2[1] / splitTotal * 100, 0) : '') + '</span></div>').join('') + '</div>';
+
+  html += '<div class="grid-2">' +
+    card('Divisão do investimento Meta por frente', 'conta inteira, classificada pelo nome da campanha · categoria nominal — uma cor só · toda a série — não usa o filtro',
+      chartBox('ch-inst-split') + splitLegend) +
+    (IM.length
+      ? multiChartCard('Investimento × Engajamento (mensal)',
+        'dois gráficos empilhados no mesmo eixo X (sem eixo duplo) · acima: gasto · abaixo: engajamento',
+        'ch-inst-mensal-gasto', 'ch-inst-mensal-eng')
+      : card('Investimento × Engajamento (mensal)', 'gasto e interações por mês', emptyDashed('Sem meses de impulsionamento no período selecionado.', 'Amplie o período no topo.'))) +
+    '</div>';
+
+  // tabela campanhas institucionais (totais da série — sem fonte diária)
+  const rows = (inst.campaigns || []).slice().sort((a, b) => (b.gasto || 0) - (a.gasto || 0)).map(c => {
+    const rcpe = (c.engajamento || 0) > 0 ? (c.gasto || 0) / c.engajamento : null;
+    return '<tr><td>' + statusBadge(c.status) + '</td>' +
+      '<td class="name">' + esc(c.campanha) + '</td>' +
+      '<td class="r">' + fmt.currency(c.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(c.impressoes) + '</td>' +
+      '<td class="r">' + fmt.num(c.engajamento) + '</td>' +
+      '<td class="r">' + fmt.num(c.video_views) + '</td>' +
+      '<td class="r">' + (rcpe == null ? '—' : fmt.currency(rcpe)) + '</td></tr>';
+  }).join('');
+  html += card('Campanhas institucionais',
+    'status real via API · totais de toda a série (a API não expõe o diário por campanha de impulsionamento no resumo atual) — <strong>não usa o filtro de período</strong>',
+    rows
+      ? tableWrap([
+        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
+        { t: 'Engajamento', r: 1 }, { t: 'Views', r: 1 }, { t: 'Custo/engaj.', r: 1 }
+      ], rows)
+      : emptyDashed('Nenhuma campanha de impulsionamento registrada.'));
+
+  el.innerHTML = html;
+
+  // Nominal → barra horizontal, UMA cor (terracota = gasto) + rótulo direto
+  // em toda barra (relief exigido pelos 2,99:1 da terracota) + legenda com
+  // valores e % abaixo.
+  makeChart('ch-inst-split', {
+    type: 'bar',
+    data: {
+      labels: splitShort,
+      datasets: [barDs('Gasto (R$)', splitPairs.map(p2 => p2[1]), S.terracota, { borderSkipped: 'left' })]
+    },
+    options: baseOpts({
+      indexAxis: 'y',
+      plugins: {
+        tooltip: { callbacks: moneyTooltip() },
+        directLabels: { mode: 'all', format: fmt.moneyShort }
+      },
+      scales: {
+        x: yCount({
+          position: 'bottom', grace: '18%',
+          ticks: { maxRotation: 0, minRotation: 0, callback: v => 'R$ ' + Number(v).toLocaleString('pt-BR') }
+        }),
+        y: { grid: { display: false }, ticks: { color: P.soft } }
+      }
+    })
+  });
+
+  if (IM.length) {
+    const labels = IM.map(r => mesLabel(r.mes));
+    makeChart('ch-inst-mensal-gasto', {
+      type: 'bar',
+      data: { labels, datasets: [barDs('Gasto (R$)', IM.map(r => r.gasto || 0), S.terracota)] },
+      options: baseOpts({
+        plugins: {
+          tooltip: { callbacks: moneyTooltip() },
+          directLabels: { mode: 'all', format: fmt.moneyShort }
+        },
+        scales: {
+          x: xCat({ ticks: { display: false } }),
+          y: lockYWidth(yMoney({ grace: '20%' }), 68)
+        }
+      })
+    });
+    makeChart('ch-inst-mensal-eng', {
+      type: 'bar',
+      data: { labels, datasets: [barDs('Engajamento', IM.map(r => r.engajamento || 0), S.oliva)] },
+      options: baseOpts({
+        plugins: { directLabels: { mode: 'all', format: fmt.num } },
+        scales: {
+          x: xCat(),
+          y: lockYWidth(yCount({ grace: '20%', ticks: { callback: v => Number(v).toLocaleString('pt-BR') } }), 68)
+        }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   PÚBLICO (compartilhada) — breakdowns mensais da Meta, campo "frente"
+   B2B: linhas frente = b2b · E-commerce: toggle ecommerce / inst / ambas
+   ============================================================ */
+function pubFrentes(front) {
+  if (front === 'b2b') return ['b2b'];
+  if (ECOM_PUB_VIEW === 'ambas') return ['ecommerce', 'inst'];
+  return [ECOM_PUB_VIEW];
+}
+/* Ordem preferida dos buckets da Meta; faixas NOVAS que o ETL passar a emitir
+   (ex.: '13-17') entram no fim da lista conhecida em vez de sumirem do
+   gráfico enquanto seguem somadas no total. */
+const AGE_ORDER = ['13-17', '18-24', '25-34', '35-44', '45-54', '55-64', '65+', 'Unknown'];
+function stackByAgeGender(rows, field, frentes) {
+  // Faixas derivadas dos DADOS (todas as linhas, sem filtro — categorias
+  // estáveis ao trocar período/toggle), ordenadas pela ordem conhecida.
+  const ord = a => { const i = AGE_ORDER.indexOf(a); return i < 0 ? AGE_ORDER.length : i; };
+  const ages = Array.from(new Set((rows || []).map(r => r.idade).filter(a => a != null)))
+    .sort((a, b) => (ord(a) - ord(b)) || String(a).localeCompare(String(b), 'pt-BR'));
+  const g = { female: Object.create(null), male: Object.create(null), unknown: Object.create(null) };
+  let total = 0;
+  (rows || []).forEach(r => {
+    if (!monthInPeriod(r.mes)) return;
+    if (frentes.indexOf(r.frente) < 0) return;
+    const gg = Object.prototype.hasOwnProperty.call(g, r.genero) ? g[r.genero] : g.unknown;
+    gg[r.idade] = (gg[r.idade] || 0) + (r[field] || 0);
+    total += r[field] || 0;
+  });
+  return {
+    ages, total,
+    fem: ages.map(a => g.female[a] || 0),
+    mas: ages.map(a => g.male[a] || 0),
+    unk: ages.map(a => g.unknown[a] || 0)
+  };
+}
+function renderPublico(el, front) {
+  const pub = DATA.publico || {};
+  const frentes = pubFrentes(front);
+  const isB2B = front === 'b2b';
+
+  let html = '';
+  if (isB2B) {
+    html += qualityBanners(false);
+    html += banner('blue', 'Dados da Meta com granularidade <strong>mensal</strong> — o filtro considera os <strong>meses selecionados inteiros</strong>. ' +
+      'Somente as campanhas da frente <strong>B2B</strong> (campo frente = b2b).');
+  } else {
+    html += banner('blue', 'Dados da Meta com granularidade <strong>mensal</strong> — o filtro considera os <strong>meses selecionados inteiros</strong>. ' +
+      'O institucional é da <strong>conta inteira</strong> — não é específico desta frente.');
+    const opts = [['ecommerce', 'E-commerce'], ['inst', 'Institucional'], ['ambas', 'Ambas']];
+    html += '<div class="seg-toggle" id="pub-toggle">' + opts.map(o =>
+      '<button type="button" data-v="' + o[0] + '" class="' + (ECOM_PUB_VIEW === o[0] ? 'on' : '') + '">' + o[1] + '</button>').join('') + '</div>';
+  }
+
+  // segunda métrica: B2B tem leads_plat; e-commerce não reporta leads → cliques
+  const metric2 = isB2B ? 'leads_plat' : 'cliques';
+  const metric2Title = isB2B ? 'Leads Plataforma por idade e gênero' : 'Cliques por idade e gênero';
+  const metric2Sub = isB2B
+    ? 'quem responde aos anúncios (número da plataforma — referência)'
+    : 'quem clica nos anúncios da(s) frente(s) selecionada(s)';
+
+  const inv = stackByAgeGender(pub.age_gender, 'gasto', frentes);
+  const m2 = stackByAgeGender(pub.age_gender, metric2, frentes);
+
+  // posicionamentos
+  const placM = (pub.placement || []).filter(r => monthInPeriod(r.mes) && frentes.indexOf(r.frente) >= 0);
+  const byPlace = aggBy(placM, r => (r.plataforma || '?') + ' · ' + (r.posicao || '?'), ['gasto', 'impressoes', 'cliques', 'leads_plat']);
+  const placeRows = Object.keys(byPlace)
+    .map(k => ({ k, v: byPlace[k] }))
+    .filter(r => r.v.gasto > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto)
+    .map(r => {
+      const rctr = r.v.impressoes > 0 ? r.v.cliques / r.v.impressoes * 100 : null;
+      return '<tr><td class="name" style="text-transform:lowercase">' + esc(r.k) + '</td>' +
+        '<td class="r">' + fmt.currency(r.v.gasto) + '</td>' +
+        '<td class="r">' + fmt.num(r.v.impressoes) + '</td>' +
+        '<td class="r">' + fmt.num(r.v.cliques) + '</td>' +
+        '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
+        (isB2B ? '<td class="r">' + fmt.num(r.v.leads_plat) + '</td>' : '') + '</tr>';
+    }).join('');
+
+  // regiões
+  const regM = (pub.region || []).filter(r => monthInPeriod(r.mes) && frentes.indexOf(r.frente) >= 0);
+  const byReg = aggBy(regM, r => (r.regiao || '(sem região)').replace(' (state)', ''), ['gasto']);
+  const topReg = Object.keys(byReg)
+    .map(k => ({ k, gasto: byReg[k].gasto }))
+    .sort((a, b) => b.gasto - a.gasto)
+    .slice(0, 12);
+
+  const genderReliefRows = d => d.ages.map((a, i) =>
+    '<tr><td>' + esc(a) + '</td><td class="r">' + fmt.num(d.fem[i]) + '</td>' +
+    '<td class="r">' + fmt.num(d.mas[i]) + '</td><td class="r">' + fmt.num(d.unk[i]) + '</td></tr>').join('');
+  const genderReliefRowsMoney = d => d.ages.map((a, i) =>
+    '<tr><td>' + esc(a) + '</td><td class="r">' + fmt.currency(d.fem[i]) + '</td>' +
+    '<td class="r">' + fmt.currency(d.mas[i]) + '</td><td class="r">' + fmt.currency(d.unk[i]) + '</td></tr>').join('');
+  const gHead = [{ t: 'Idade' }, { t: 'Feminino', r: 1 }, { t: 'Masculino', r: 1 }, { t: 'Não informado', r: 1 }];
+
+  html += '<div class="grid-2">' +
+    (inv.total > 0
+      ? chartCard('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', 'ch-pub-inv', '',
+        reliefTable(gHead, genderReliefRowsMoney(inv)))
+      : card('Investimento por idade e gênero', 'onde o orçamento está sendo gasto', emptyDashed('Sem dados de público nos meses do período.', 'Amplie o período no topo.'))) +
+    (m2.total > 0
+      ? chartCard(metric2Title, metric2Sub, 'ch-pub-m2', '', reliefTable(gHead, genderReliefRows(m2)))
+      : card(metric2Title, metric2Sub, emptyDashed(isB2B
+        ? 'Sem leads de plataforma nos meses do período.'
+        : 'Sem cliques nos meses do período.', 'Amplie o período no topo.'))) +
+    '</div>';
+
+  html += '<div class="grid-2">' +
+    card('Posicionamentos', 'feed, stories, reels — onde os anúncios rodam',
+      placeRows
+        ? tableWrap([
+          { t: 'Posicionamento' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 },
+          { t: 'Cliques', r: 1 }, { t: 'CTR', r: 1 }
+        ].concat(isB2B ? [{ t: 'Leads plataforma', r: 1 }] : []), placeRows)
+        : emptyDashed('Sem dados de posicionamento nos meses do período.')) +
+    (topReg.length
+      ? chartCard('Regiões', 'top 12 por investimento · categoria nominal — uma cor só', 'ch-pub-reg', 'tall')
+      : card('Regiões', 'top 12 por investimento', emptyDashed('Sem dados de região nos meses do período.'))) +
+    '</div>';
+
+  el.innerHTML = html;
+
+  // toggle do e-commerce (re-render da página)
+  if (!isB2B) {
+    const tg = document.getElementById('pub-toggle');
+    if (tg) tg.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => {
+        if (ECOM_PUB_VIEW !== b.dataset.v) { ECOM_PUB_VIEW = b.dataset.v; route(); }
+      });
+    });
+  }
+
+  // Stacked: Feminino=mostarda, Masculino=terracota, Não informado=cinza neutro.
+  // Gap de 2px entre segmentos via borda na cor da superfície; relief "Ver tabela".
+  const milharTick = v => Number(v).toLocaleString('pt-BR');
+  const stackedOpts = moneyAxis => baseOpts({
+    plugins: deepMerge({ legend: legendTop() }, moneyAxis ? { tooltip: { callbacks: moneyTooltip() } } : {}),
+    scales: {
+      x: xCat({ stacked: true }),
+      y: moneyAxis ? yCount({ stacked: true, ticks: { callback: milharTick } }) : yCount({ stacked: true })
+    }
+  });
+  const segExtra = { stack: 'g', borderColor: P.bgCard, borderWidth: 2, borderRadius: 3, maxBarThickness: 42 };
+  const genderSets = d => [
+    barDs('Feminino', d.fem, S.mostarda, segExtra),
+    barDs('Masculino', d.mas, S.terracota, segExtra),
+    barDs('Não informado', d.unk, P.muted, segExtra)
+  ];
+  if (inv.total > 0) {
+    makeChart('ch-pub-inv', { type: 'bar', data: { labels: inv.ages, datasets: genderSets(inv) }, options: stackedOpts(true) });
+  }
+  if (m2.total > 0) {
+    makeChart('ch-pub-m2', { type: 'bar', data: { labels: m2.ages, datasets: genderSets(m2) }, options: stackedOpts(false) });
+  }
+  if (topReg.length) {
+    // Nominal → UMA cor (terracota) + rótulo direto em toda barra (relief)
+    makeChart('ch-pub-reg', {
+      type: 'bar',
+      data: {
+        labels: topReg.map(r => r.k),
+        datasets: [barDs('Gasto (R$)', topReg.map(r => r.gasto), S.terracota, { borderSkipped: 'left' })]
+      },
+      options: baseOpts({
+        indexAxis: 'y',
+        plugins: {
+          tooltip: { callbacks: moneyTooltip() },
+          directLabels: { mode: 'all', format: fmt.moneyShort }
+        },
+        scales: {
+          x: yCount({ position: 'bottom', grace: '18%', ticks: { maxRotation: 0, minRotation: 0, callback: milharTick } }),
+          y: { grid: { display: false }, ticks: { color: P.soft } }
+        }
+      })
+    });
+  }
+}
+
+/* ============================================================
+   E-COMMERCE · EVOLUÇÃO MENSAL
+   ============================================================ */
+function renderEvolucaoEcom(el) {
+  const metaM = (DATA.meta_ecom || {}).monthly || [];
+  const roasM = metaM.map(r => (r.gasto > 0 && r.valor_compras != null) ? r.valor_compras / r.gasto : null);
+
+  let html = '<div class="note-blue">Visão mensal completa da frente E-commerce — <strong>não usa o filtro de período do topo</strong>. ' +
+    'Compras e receita reportadas pelo pixel da Meta.</div>';
+
+  if (!metaM.length) {
+    html += card('Evolução mensal', 'série mensal da frente', emptyDashed('Sem série mensal ainda.'));
+    el.innerHTML = html;
+    return;
+  }
+
+  html += '<div class="grid-2">' +
+    chartCard('Investimento por mês', 'gasto das campanhas [ECOMMERCE]', 'ch-eve-gasto') +
+    chartCard('Compras por mês', 'pixel da Meta', 'ch-eve-compras') +
+    '</div>';
+  html += '<div class="grid-2">' +
+    chartCard('Receita por mês', 'pixel da Meta', 'ch-eve-receita') +
+    chartCard('ROAS por mês', 'receita ÷ gasto', 'ch-eve-roas') +
+    '</div>';
+
+  el.innerHTML = html;
+
+  const labels = metaM.map(r => mesLabel(r.mes));
+  makeChart('ch-eve-gasto', {
+    type: 'bar',
+    data: { labels, datasets: [barDs('Gasto (R$)', metaM.map(r => r.gasto || 0), S.terracota)] },
+    options: baseOpts({
+      plugins: {
+        tooltip: { callbacks: moneyTooltip() },
+        directLabels: { mode: 'all', format: fmt.moneyShort }
+      },
+      scales: { x: xCat(), y: yMoney({ grace: '20%' }) }
+    })
+  });
+  makeChart('ch-eve-compras', {
+    type: 'bar',
+    data: { labels, datasets: [barDs('Compras', metaM.map(r => r.compras || 0), S.oliva)] },
+    options: baseOpts({
+      plugins: { directLabels: { mode: 'all', format: fmt.num } },
+      scales: { x: xCat(), y: yCount({ grace: '15%' }) }
+    })
+  });
+  makeChart('ch-eve-receita', {
+    type: 'bar',
+    data: { labels, datasets: [barDs('Receita (R$)', metaM.map(r => r.valor_compras || 0), S.mostarda)] },
+    options: baseOpts({
+      plugins: {
+        tooltip: { callbacks: moneyTooltip() },
+        directLabels: { mode: 'all', format: fmt.moneyShort }
+      },
+      scales: { x: xCat(), y: yMoney({ grace: '20%' }) }
+    })
+  });
+  makeChart('ch-eve-roas', {
+    type: 'line',
+    data: { labels, datasets: [lineDs('ROAS', roasM, S.terracota, { pointRadius: 4, spanGaps: false })] },
+    options: baseOpts({
+      plugins: {
+        tooltip: { callbacks: { label: ctx => ctx.parsed.y == null ? 'sem gasto no mês' : 'ROAS: ' + fmt.dec(ctx.parsed.y, 2) + '×' } },
+        directLabels: { mode: 'all', format: v => fmt.dec(v, 2) + '×' }
+      },
+      scales: { x: xCat(), y: yCount({ grace: '25%', ticks: { callback: v => fmt.dec(v, 1) + '×' } }) }
+    })
+  });
+}
+
+/* ============================================================
    Carga de dados (sem login — autenticação em fase futura)
    ============================================================ */
 function showFatal(msg) {
@@ -1436,9 +2026,6 @@ function startDashboard() {
   computeDataBounds();
 
   document.getElementById('stamp').textContent = 'atualizado em ' + (DATA.last_update || '—');
-
-  document.getElementById('nav').innerHTML = PAGES.map(p =>
-    '<a href="#/' + p.id + '" data-page="' + p.id + '"><span class="ic">' + p.ic + '</span><span>' + p.label + '</span></a>').join('');
 
   buildFilterUI();
   setPreset('all', false);
