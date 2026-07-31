@@ -11,10 +11,10 @@ on:
     branches: [main]
     paths: ["dashboard/**", ".github/workflows/deploy_pages.yml"]
   schedule:
-    # 07:30, 13:30 e 16:00 BRT (UTC-3)
-    - cron: "30 10 * * *"
-    - cron: "30 16 * * *"
-    - cron: "0 19 * * *"
+    # 1x/dia às 06:00 BRT (09:00 UTC) — decisão da gestora para economizar
+    # o limite de deploys quando a Netlify voltar. O GitHub pode atrasar
+    # alguns minutos o cron; o site publica "por volta das 6h".
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 permissions:

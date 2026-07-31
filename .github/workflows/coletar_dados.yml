@@ -1,11 +1,9 @@
 name: Coletar Dados Dashboard Terrana
 
+# Agendamento desligado: enquanto o Supabase não está ativo, quem coleta e
+# publica é o deploy_pages.yml (1x/dia às 06:00 BRT). Reativar o cron aqui
+# quando o modelo com bucket privado + login entrar em produção.
 on:
-  schedule:
-    # 07:30, 13:30 e 16:00 BRT (UTC-3)
-    - cron: "30 10 * * *"
-    - cron: "30 16 * * *"
-    - cron: "0 19 * * *"
   workflow_dispatch:
 
 jobs:
