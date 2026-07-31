@@ -484,6 +484,7 @@ const FRONTS = {
     pages: [
       { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoEcom },
       { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaEcom },
+      { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
       { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
       { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'ecom') },
       { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoEcom }
