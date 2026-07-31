@@ -470,7 +470,7 @@ const FRONTS = {
       { id: 'funil', label: 'Funil CRM', ic: '🎯', render: renderFunilCRM },
       { id: 'atendimento', label: 'Atendimento', ic: '💬', render: renderAtendimento },
       { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaB2B },
-      { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
+      { id: 'google', label: 'Google Ads', ic: '🔍', render: el => renderGoogleAds(el, 'b2b') },
       { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'b2b') },
       { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoB2B },
       { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM }
@@ -484,7 +484,7 @@ const FRONTS = {
     pages: [
       { id: 'visao', label: 'Visão Geral', ic: '📊', render: renderVisaoEcom },
       { id: 'meta', label: 'Meta Ads', ic: '📱', render: renderMetaEcom },
-      { id: 'google', label: 'Google Ads', ic: '🔍', render: renderGoogleAds },
+      { id: 'google', label: 'Google Ads', ic: '🔍', render: el => renderGoogleAds(el, 'ecom') },
       { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
       { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'ecom') },
       { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoEcom }
@@ -597,6 +597,8 @@ function computeDataBounds() {
   push(DATA.leads && DATA.leads.daily, 'dia');
   push(DATA.meta_b2b && DATA.meta_b2b.daily, 'dia');
   push(DATA.meta_ecom && DATA.meta_ecom.daily, 'dia');
+  push(DATA.google_b2b && DATA.google_b2b.daily, 'dia');
+  push(DATA.google_ecom && DATA.google_ecom.daily, 'dia');
   push(DATA.atendimento && DATA.atendimento.msgs_daily, 'dia');
   push(DATA.crm && DATA.crm.deals_minimal, 'criado_em');
   push(DATA.crm && DATA.crm.losses_daily, 'criado');
@@ -667,7 +669,7 @@ function renderVisaoB2B(el) {
     kpi('CPL (CRM)', cpl == null ? null : fmt.currency(cpl),
       cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true, hero: true }) +
     kpi('Leads no CRM', fmt.num(leadsCRM), 'criados no período · pipeline B2B') +
-    kpi('Investimento', fmt.currency(invest), 'Meta (frente B2B) · Google: sem integração') +
+    kpi('Investimento', fmt.currency(invest), 'Meta (frente B2B) · Google: sem campanhas B2B ainda') +
     kpi('Leads plataforma', fmt.num(leadsPlat), 'reportado pela plataforma (referência)') +
     kpi('Vendas', fmt.num(vendas), 'no período') +
     kpi('Perdidos', fmt.num(perdidos), 'no período') +
@@ -1212,29 +1214,144 @@ function renderMetaB2B(el) {
 }
 
 /* ============================================================
-   B2B · GOOGLE ADS (integração pendente — estado vazio)
+   GOOGLE ADS (compartilhada) — lê google_b2b / google_ecom pela frente.
+   Conversões e valor são MÉTRICA DE PLATAFORMA → sempre rotuladas
+   "atribuição do Google" (regra 1 da agência).
    ============================================================ */
-function renderGoogleAds(el) {
-  const g = DATA.google_ads || {};
-  let html = qualityBanners(false);
+/* Status do Google Ads (ENABLED/PAUSED/REMOVED) — escala própria, distinta
+   do statusBadge da Meta (ACTIVE/PAUSED). Ausente = "—", nunca inferido. */
+function googleStatusBadge(st) {
+  if (st === 'ENABLED') return '<span class="badge green">Ativo</span>';
+  if (st === 'PAUSED') return '<span class="badge gray">Pausada</span>';
+  if (st === 'REMOVED') return '<span class="badge gray">Removida</span>';
+  if (st) return '<span class="badge gray">' + esc(st) + '</span>';
+  return '<span class="muted" title="status indisponível na API — não inferimos">—</span>';
+}
+function renderGoogleAds(el, frente) {
+  const g = (frente === 'b2b' ? DATA.google_b2b : DATA.google_ecom) || {};
+  // Banners de qualidade descrevem CRM/UTM — só fazem sentido no painel B2B.
+  let html = frente === 'b2b' ? qualityBanners(false) : '';
 
-  if (g.disponivel === false || !g.daily) {
+  // ----- Indisponível → estado vazio tracejado com o motivo do JSON -----
+  if (g.disponivel !== true || !g.daily) {
     html += '<div class="kpis cols-6">' +
-      kpi('Gasto', null, 'no período') +
-      kpi('Impressões', null, '') +
-      kpi('Cliques', null, '') +
-      kpi('CPC', null, '') +
-      kpi('Conversões', null, 'plataforma (referência)') +
-      kpi('Custo/conversão', null, '', { teal: true }) +
+      kpi('Investimento', null, 'no período') +
+      kpi('Conversões', null, 'atribuição do Google') +
+      kpi('Valor conv.', null, 'atribuição do Google') +
+      kpi('ROAS', null, 'valor conv. ÷ gasto', { teal: true }) +
+      kpi('CPA', null, 'gasto ÷ conversões') +
+      kpi('Cliques', null, 'no período') +
       '</div>';
-    html += card('Google Ads', 'status real via API',
-      emptyDashed('Integração Google Ads ainda não conectada.',
-        esc(g.motivo || 'Aguardando credenciais do Google Ads.') +
-        ' Quando o ETL passar a publicar os dados, esta página espelha o layout do Meta Ads automaticamente.'));
-  } else {
-    html += banner('amber', '<strong>Dados do Google Ads recebidos, mas esta página ainda não foi construída.</strong> O layout espelha o Meta Ads — pendência de implementação no front.');
+    html += card('Google Ads', 'status da frente ' + (frente === 'b2b' ? 'B2B' : 'E-commerce'),
+      emptyDashed('Google Ads sem dados para esta frente.',
+        esc(g.motivo || 'Aguardando dados do Google Ads no ETL.')));
+    el.innerHTML = html;
+    return;
   }
+
+  // ----- Disponível: KPIs do período (daily) -----
+  const dP = fdays(g.daily);
+  const gasto = sum(dP, 'gasto');
+  const imp = sum(dP, 'impressoes');
+  const cli = sum(dP, 'cliques');
+  const ctr = imp > 0 ? cli / imp * 100 : null;
+  const conv = sum(dP, 'conversoes');
+  const valor = sum(dP, 'valor_conversoes');
+  const roas = gasto > 0 ? valor / gasto : null;
+  const cpa = conv > 0 ? gasto / conv : null;
+
+  html += banner('blue', 'Conversões e valor de conversão são reportados pelo <strong>Google</strong> ' +
+    '(atribuição da plataforma — referência), não vendas confirmadas. ' +
+    (frente === 'ecom'
+      ? 'Campanhas de <strong>Shopping</strong> da frente e-commerce — as compras do pixel da Meta ficam no Meta Ads e na Visão Geral.'
+      : 'Somente as campanhas de leads da frente B2B.'));
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Investimento', fmt.currency(gasto), 'no período') +
+    kpi('Conversões', fmt.num(conv), 'atribuição do Google') +
+    kpi('Valor conv.', fmt.currency(valor), 'atribuição do Google') +
+    kpi('ROAS', roas == null ? null : fmt.dec(roas, 2) + '×',
+      (roas == null ? 'sem gasto no período · ' : 'valor conv. ÷ gasto · ') + 'atribuição do Google', { teal: true }) +
+    kpi('CPA', cpa == null ? null : fmt.currency(cpa),
+      cpa == null ? 'sem conversões no período' : 'gasto ÷ conversões · atribuição do Google') +
+    kpi('Cliques', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
+    '</div>';
+
+  // ----- Gasto × Conversões por dia — small multiples no MESMO X (sem eixo
+  //       duplo) · terracota densa → relief "Ver tabela" + rótulo no pico -----
+  const sDay = dailySeries(g.daily, ['gasto', 'conversoes']);
+  html += (sDay
+    ? multiChartCard('Gasto × Conversões por dia',
+      'dois gráficos empilhados no mesmo eixo X (sem eixo duplo) · acima: gasto · abaixo: conversões (atribuição do Google)',
+      'ch-g-gasto-dia', 'ch-g-conv-dia',
+      dailyRelief(sDay, [
+        { k: 'gasto', t: 'Gasto', f: fmt.currency },
+        { k: 'conversoes', t: 'Conversões', f: fmt.num }
+      ]))
+    : card('Gasto × Conversões por dia', 'gasto e conversões diárias',
+      emptyDashed('Sem dados do Google Ads no período selecionado.', 'Ajuste o filtro de período no topo.')));
+
+  // ----- Tabela CAMPANHAS — agregada do campaign_daily no período -----
+  const statusDict = dict(g.campaign_status);
+  const campDailyP = fdays(g.campaign_daily);
+  const byCamp = aggBy(campDailyP, r => r.campanha, ['gasto', 'impressoes', 'cliques', 'conversoes', 'valor_conversoes']);
+  const campRows = Object.keys(byCamp)
+    .map(k => ({ nome: k, v: byCamp[k] }))
+    .filter(r => r.v.gasto > 0 || r.v.conversoes > 0)
+    .sort((a, b) => b.v.gasto - a.v.gasto);
+  const campBody = campRows.map(r => {
+    const v = r.v;
+    const rctr = v.impressoes > 0 ? v.cliques / v.impressoes * 100 : null;
+    const rroas = v.gasto > 0 ? v.valor_conversoes / v.gasto : null;
+    const rcpa = v.conversoes > 0 ? v.gasto / v.conversoes : null;
+    return '<tr><td>' + googleStatusBadge(statusDict[r.nome]) + '</td>' +
+      '<td class="name">' + esc(r.nome) + '</td>' +
+      '<td class="r">' + fmt.currency(v.gasto) + '</td>' +
+      '<td class="r">' + fmt.num(v.impressoes) + '</td>' +
+      '<td class="r">' + fmt.num(v.cliques) + '</td>' +
+      '<td class="r">' + fmt.pct(rctr, 1) + '</td>' +
+      '<td class="r">' + fmt.num(v.conversoes) + '</td>' +
+      '<td class="r">' + fmt.currency(v.valor_conversoes) + '</td>' +
+      '<td class="r">' + (rroas == null ? '—' : fmt.dec(rroas, 2) + '×') + '</td>' +
+      '<td class="r">' + (rcpa == null ? '—' : fmt.currency(rcpa)) + '</td></tr>';
+  }).join('');
+  html += card('Campanhas', 'status real via API · métricas do período filtrado · conversões e valor: atribuição do Google',
+    campBody
+      ? tableWrap([
+        { t: 'Status' }, { t: 'Campanha' }, { t: 'Gasto', r: 1 }, { t: 'Impressões', r: 1 }, { t: 'Cliques', r: 1 },
+        { t: 'CTR', r: 1 }, { t: 'Conversões', r: 1 }, { t: 'Valor conv.', r: 1 }, { t: 'ROAS', r: 1 }, { t: 'CPA', r: 1 }
+      ], campBody)
+      : emptyDashed('Nenhuma campanha do Google com gasto no período.', 'Ajuste o filtro de período no topo.'));
+
   el.innerHTML = html;
+
+  if (sDay) {
+    makeChart('ch-g-gasto-dia', {
+      type: 'bar',
+      data: { labels: sDay.labels, datasets: [barDs('Gasto (R$)', sDay.data.gasto, S.terracota)] },
+      options: baseOpts({
+        plugins: {
+          tooltip: { callbacks: moneyTooltip() },
+          directLabels: { mode: 'max', format: fmt.moneyShort }   // pico rotulado; relief na tabela
+        },
+        scales: {
+          x: deepMerge(xDaily(), { ticks: { display: false } }),
+          y: lockYWidth(yMoney({ grace: '18%' }), 68)
+        }
+      })
+    });
+    makeChart('ch-g-conv-dia', {
+      type: 'bar',
+      data: { labels: sDay.labels, datasets: [barDs('Conversões', sDay.data.conversoes, S.oliva)] },
+      options: baseOpts({
+        plugins: { directLabels: { mode: 'max', format: fmt.num } },
+        scales: {
+          x: xDaily(),
+          y: lockYWidth(yCount({ grace: '18%' }), 68)
+        }
+      })
+    });
+  }
 }
 
 /* ============================================================
@@ -1415,19 +1532,46 @@ function renderVisaoEcom(el) {
   const roas = gasto > 0 ? receita / gasto : null;
   const cpa = compras > 0 ? gasto / compras : null;
 
-  let html = banner('blue', 'Compras e receita vêm do <strong>pixel da Meta</strong> (atribuição da plataforma) — ' +
-    'a loja ainda não envia venda confirmada para cá. Sem CRM nesta frente: a loja não usa o Kommo.');
+  // Google Ads da frente (Shopping) — só o INVESTIMENTO soma com a Meta;
+  // conversões/valor do Google são atribuição da plataforma e ficam em
+  // bloco próprio, nunca misturadas com compras/receita do pixel.
+  const ge = DATA.google_ecom || {};
+  const gOk = ge.disponivel === true && !!ge.daily;
+  const gdP = gOk ? fdays(ge.daily) : [];
+  const gGasto = sum(gdP, 'gasto');
+  const gConv = sum(gdP, 'conversoes');
+  const gValor = sum(gdP, 'valor_conversoes');
+  const gRoas = gGasto > 0 ? gValor / gGasto : null;
+  const investTotal = gasto + gGasto;
 
-  // KPI-herói: ROAS
+  let html = banner('blue', 'Compras e receita vêm do <strong>pixel da Meta</strong> (atribuição da plataforma) — ' +
+    'a loja ainda não envia venda confirmada para cá. Sem CRM nesta frente: a loja não usa o Kommo. ' +
+    'O <strong>Google Ads</strong> fica no bloco próprio abaixo — só o <strong>Investimento total</strong> soma as duas plataformas.');
+
+  // KPI-herói: ROAS (só Meta — receita e gasto da mesma plataforma)
   html += '<div class="kpis cols-hero-6">' +
     kpi('ROAS', roas == null ? null : fmt.dec(roas, 2) + '×',
-      roas == null ? 'sem gasto no período' : 'receita ÷ gasto · pixel da Meta', { teal: true, hero: true }) +
-    kpi('Investimento', fmt.currency(gasto), 'campanhas [ECOMMERCE] no período') +
-    kpi('Compras', fmt.num(compras), 'pixel da Meta · no período') +
-    kpi('Receita', fmt.currency(receita), 'pixel da Meta · no período') +
-    kpi('CPA', cpa == null ? null : fmt.currency(cpa), 'gasto ÷ compras') +
+      roas == null ? 'sem gasto no período' : 'receita ÷ gasto · pixel da Meta (só Meta)', { teal: true, hero: true }) +
+    kpi('Investimento (Meta)', fmt.currency(gasto), 'campanhas [ECOMMERCE] no período') +
+    kpi('Compras', fmt.num(compras), 'pixel da Meta (só Meta) · no período') +
+    kpi('Receita', fmt.currency(receita), 'pixel da Meta (só Meta) · no período') +
+    kpi('CPA', cpa == null ? null : fmt.currency(cpa), 'gasto ÷ compras · só Meta') +
     kpi('Cliques', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
     '</div>';
+
+  // ----- Investimento total + KPIs Google (atribuição do Google) -----
+  html += card('Google Ads (Shopping) · atribuição do Google',
+    gOk
+      ? 'contexto da frente · o <strong>Investimento total</strong> soma Meta + Google no período; conversões e valor são reportados pelo Google e <strong>não somam</strong> com as compras/receita do pixel acima · detalhe na página Google Ads'
+      : esc(ge.motivo || 'Google Ads sem dados para esta frente.'),
+    '<div class="kpis cols-4 in-card">' +
+    kpi('Investimento total', fmt.currency(investTotal),
+      gOk ? 'Meta + Google Ads da frente · no período' : 'só Meta no período — Google sem dados') +
+    kpi('Investimento Google', gOk ? fmt.currency(gGasto) : null, gOk ? 'Shopping · no período' : 'sem dados') +
+    kpi('Conversões Google', gOk ? fmt.num(gConv) : null, 'atribuição do Google') +
+    kpi('ROAS Google', (gOk && gRoas != null) ? fmt.dec(gRoas, 2) + '×' : null,
+      'valor conv. ÷ gasto · atribuição do Google') +
+    '</div>');
 
   const sG = dailySeries(me.daily, ['gasto']);
   const sC = dailySeries(me.daily, ['compras', 'valor_compras']);

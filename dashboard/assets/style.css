@@ -210,7 +210,10 @@ a:hover { text-decoration: underline; }
 .kpis { display: grid; gap: 14px; margin-bottom: 28px; }
 .cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* fileira de KPIs dentro de um card (bloco Google da Visão Geral e-commerce) */
+.kpis.in-card { margin-bottom: 0; }
 /* Fileira com KPI-herói (1º card maior — CPL CRM no B2B, ROAS no e-commerce) */
 .cols-hero-6 { grid-template-columns: 1.6fr repeat(5, minmax(0, 1fr)); }
 .kpi {
@@ -471,6 +474,7 @@ body.mode-select #selector {
 /* ---------- responsivo ---------- */
 @media (max-width: 1500px) {
   .cols-6, .cols-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cols-hero-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .cols-hero-6 .kpi.hero { grid-column: span 3; }
 }
@@ -486,7 +490,7 @@ body.mode-select #selector {
   #topbar { position: static; flex-wrap: wrap; }
 }
 @media (max-width: 760px) {
-  .cols-6, .cols-5, .cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cols-6, .cols-5, .cols-4, .cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cols-hero-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cols-hero-6 .kpi.hero { grid-column: span 2; }
   #content { padding: 14px; }

@@ -545,7 +545,11 @@ def classificar_frente(nome):
             or "geração de leads b2b" in n or "geracao de leads b2b" in n
             or ("leads" in n and "b2b" in n)):
         return "b2b"
-    if "ecommerce" in n or "[venda]" in n or "[compra]" in n:
+    # Meta: [ECOMMERCE]/[VENDA]/[COMPRA] · Google: campanhas de Shopping
+    # ("SH"/"[SH]") e de vendas — tudo loja online.
+    if ("ecommerce" in n or "[venda]" in n or "[compra]" in n
+            or "[vendas]" in n or "[sh]" in n or n.startswith("sh ")
+            or n.startswith("sh-") or "shopping" in n):
         return "ecommerce"
     if n.startswith("impulsionamento") or "instagram post" in n:
         return "inst"
@@ -679,6 +683,64 @@ def qualidade_por_responsavel(leads, statuses, events):
         "tempo_1o_atend_dias": mediana(v["t1"]),
         "parado_dias": mediana(v["parado"]),
     } for nome, v in por_resp.items()], key=lambda x: -x["leads"])
+
+
+def aggregate_google(rows, campaign_status):
+    """Google Ads nível campanha×dia (uma frente por chamada).
+
+    'conversoes'/'valor_conversoes' são da plataforma (rotular como
+    referência no front — regra 1); nas campanhas de Shopping equivalem a
+    compras e receita atribuídas pelo Google.
+    """
+    monthly = defaultdict(lambda: defaultdict(float))
+    daily = defaultdict(lambda: defaultdict(float))
+    camp_day = defaultdict(lambda: defaultdict(float))
+    campanhas = defaultdict(lambda: defaultdict(float))
+
+    for r in rows:
+        d, m, camp = r["data"], r["data"][:7], r["campanha"]
+        for bucket, key in ((monthly, m), (daily, d),
+                            (camp_day, (camp, d)), (campanhas, camp)):
+            b = bucket[key]
+            b["gasto"] += r["gasto"]
+            b["impressoes"] += r["impressoes"]
+            b["cliques"] += r["cliques"]
+            b["conversoes"] += r["conversoes"]
+            b["valor_conversoes"] += r["valor_conversoes"]
+
+    def fecha(v):
+        out = {}
+        for kk, vv in v.items():
+            if kk in ("gasto", "valor_conversoes"):
+                out[kk] = rnd(vv)
+            elif kk == "conversoes":
+                out[kk] = rnd(vv, 1)
+            else:
+                out[kk] = int(vv)
+        if out.get("impressoes"):
+            out["ctr"] = rnd(out["cliques"] / out["impressoes"] * 100, 2)
+        return out
+
+    total_gasto = sum(r["gasto"] for r in rows)
+    total_conv = sum(r["conversoes"] for r in rows)
+    total_valor = sum(r["valor_conversoes"] for r in rows)
+    return {
+        "disponivel": True,
+        "total_gasto": rnd(total_gasto),
+        "total_conversoes": rnd(total_conv, 1),
+        "total_valor_conversoes": rnd(total_valor),
+        "monthly": [{"mes": k, **fecha(v)} for k, v in sorted(monthly.items())],
+        "daily": [{"dia": k, **fecha(v)} for k, v in sorted(daily.items())],
+        "campaign_daily": [{"dia": d, "campanha": c, **fecha(v)}
+                           for (c, d), v in sorted(camp_day.items(),
+                                                   key=lambda x: x[0][1])],
+        "campaigns": sorted(
+            [{"campanha": k, **fecha(v),
+              "status": campaign_status.get(k, "")}
+             for k, v in campanhas.items()], key=lambda x: -x["gasto"]),
+        "campaign_names": sorted(campanhas.keys()),
+        "campaign_status": campaign_status,
+    }
 
 
 def aggregate_utm(leads):
@@ -840,10 +902,19 @@ def main():
         if rows_ecom else None
     utm = aggregate_utm(leads)
 
-    google = {"disponivel": bool(google_rows), "motivo": ""
-              if google_rows else
-              "Aguardando credenciais OAuth do Google Ads (conta 223-460-7566). "
-              "A página fica neste estado até a integração ser concluída."}
+    google_status = ler("google_status") or {}
+    g_b2b = [r for r in google_rows
+             if classificar_frente(r["campanha"]) == "b2b"]
+    g_ecom = [r for r in google_rows
+              if classificar_frente(r["campanha"]) == "ecommerce"]
+    google_b2b = aggregate_google(g_b2b, google_status) if g_b2b else {
+        "disponivel": False,
+        "motivo": "A conta Google Ads da Terrana ainda não tem campanhas da "
+                  "frente B2B — as futuras campanhas com \"Geração de leads "
+                  "B2B\" no nome entram aqui sozinhas."}
+    google_ecom = aggregate_google(g_ecom, google_status) if g_ecom else {
+        "disponivel": False,
+        "motivo": "Sem campanhas de Shopping/vendas no período."}
 
     summary = {
         "last_update": datetime.now(BRT).strftime("%d/%m/%Y %H:%M"),
@@ -865,7 +936,8 @@ def main():
         "atendimento": atendimento,
         "meta_b2b": meta_b2b,
         "meta_ecom": meta_ecom,
-        "google_ads": google,
+        "google_b2b": google_b2b,
+        "google_ecom": google_ecom,
         "utm": utm,
         "institucional": aggregate_institucional(meta_rows, meta_status)
         if meta_rows else None,
