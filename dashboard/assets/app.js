@@ -14,18 +14,18 @@ let DATA_MIN = null, DATA_MAX = null;
 
 /* ---------- Paleta (tokens da spec) ---------- */
 const P = {
-  bgCard: '#0D1524',
-  border: '#1B2942',
-  track: '#131D30',
-  blue: '#2874FC',
-  teal: '#31CDCF',
+  bgCard: '#1A120A',
+  border: '#332415',
+  track: '#241910',
+  blue: '#E0A526',
+  teal: '#D4692E',
   green: '#10B981',
   red: '#EF4444',
   amber: '#F59E0B',
-  muted: '#6D7C96',
-  soft: '#CBD5E1',
-  text: '#F4F7FD',
-  blueLight: '#93C5FD',
+  muted: '#A28D74',
+  soft: '#DECFB8',
+  text: '#F7F1E6',
+  blueLight: '#F2CC7B',
   grid: 'rgba(255,255,255,.05)',
   redShades: ['#EF4444', '#B91C1C', '#F87171', '#7F1D1D', '#FCA5A5', '#DC2626']
 };
@@ -238,7 +238,7 @@ function setupChartDefaults() {
   Chart.defaults.font.size = 11;
   Chart.defaults.animation = false;
   Chart.defaults.locale = 'pt-BR';
-  Chart.defaults.plugins.tooltip.backgroundColor = '#0D1524';
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1A120A';
   Chart.defaults.plugins.tooltip.borderColor = P.border;
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.titleColor = P.text;
@@ -638,7 +638,7 @@ function renderFunilCRM(el) {
         datasets: [{
           data: motivosArr.map(m => m[1]),
           backgroundColor: motivosArr.map((m, i) => P.redShades[i % P.redShades.length]),
-          borderColor: '#ffffff',
+          borderColor: '#1A120A',
           borderWidth: 2
         }]
       },
@@ -1068,7 +1068,7 @@ function renderInstitucional(el) {
       datasets: [{
         data: splitPairs.map(p2 => p2[1]),
         backgroundColor: splitPairs.map(p2 => p2[2]),
-        borderColor: '#ffffff',
+        borderColor: '#1A120A',
         borderWidth: 2
       }]
     },
