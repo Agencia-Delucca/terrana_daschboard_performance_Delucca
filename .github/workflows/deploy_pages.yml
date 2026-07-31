@@ -1,13 +1,20 @@
 name: Deploy Dashboard (GitHub Pages)
 
-# Publica APENAS o front (HTML/JS/CSS). Nenhum dado vai para o Pages:
-# o summary.json vive no bucket privado do Supabase e o front o baixa
-# com sessão autenticada.
+# Ponte enquanto os deploys da Netlify estão pausados (créditos do time).
+# Coleta os dados na hora e publica o front COM os dados embutidos —
+# modelo sem login escolhido pelo cliente para esta fase. Quando a fase
+# de autenticação chegar: voltar a remover dashboard/data/* do artefato
+# e ligar o Supabase (ver README).
 
 on:
   push:
     branches: [main]
-    paths: ["dashboard/**"]
+    paths: ["dashboard/**", ".github/workflows/deploy_pages.yml"]
+  schedule:
+    # 07:30, 13:30 e 16:00 BRT (UTC-3)
+    - cron: "30 10 * * *"
+    - cron: "30 16 * * *"
+    - cron: "0 19 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,14 +29,39 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Garantir que nenhum dado vaza no artefato
-        run: rm -f dashboard/data/summary.json dashboard/data/summary.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Gate de secrets (nunca publicar dado vazio)
+        env:
+          KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$KOMMO_TOKEN" ] || [ -z "$META_ACCESS_TOKEN" ]; then
+            echo "::error::KOMMO_TOKEN/META_ACCESS_TOKEN ausentes nos Secrets"
+            exit 1
+          fi
+
+      - name: Coleta + ETL (dados frescos a cada publicação)
+        env:
+          KOMMO_SUBDOMAIN: ${{ secrets.KOMMO_SUBDOMAIN }}
+          KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+        run: |
+          python -u main.py
+          python -u scripts/generate_dashboard_data.py
 
       - uses: actions/upload-pages-artifact@v3
         with:
