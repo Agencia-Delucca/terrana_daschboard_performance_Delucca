@@ -59,9 +59,18 @@ jobs:
           KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           python -u main.py
           python -u scripts/generate_dashboard_data.py
+
+      # Com Supabase configurado o dado oficial vive no bucket PRIVADO e o
+      # site publicado não carrega nenhum dado (o front baixa após login).
+      # Sem Supabase (fase-ponte), o dado vai embutido — modelo sem senha.
+      - name: Modo autenticado — remover dados do artefato
+        if: ${{ secrets.SUPABASE_SERVICE_KEY != '' }}
+        run: rm -f dashboard/data/summary.json dashboard/data/summary.js
 
       - uses: actions/upload-pages-artifact@v3
         with:

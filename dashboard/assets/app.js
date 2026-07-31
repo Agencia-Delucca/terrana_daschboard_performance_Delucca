@@ -1987,8 +1987,17 @@ function renderEvolucaoEcom(el) {
 }
 
 /* ============================================================
-   Carga de dados (sem login — autenticação em fase futura)
+   Carga de dados — dev (embutido/fetch) × produção (Supabase Auth)
    ============================================================ */
+/* Produção: preencher ao criar o projeto Supabase exclusivo da Terrana.
+   A anon key é pública por design; o e-mail é o usuário fixo do painel
+   (blueprint da agência: a tela de login pede só a senha). */
+const SUPABASE_URL = '';
+const SUPABASE_ANON_KEY = '';
+const DASH_EMAIL = 'dashboard@terrana.com.br';
+const SUPABASE_BUCKET = 'dashboard-data';
+let sbClient = null;
+
 function showFatal(msg) {
   document.getElementById('loading').hidden = false;
   document.getElementById('loading-msg').textContent = msg;
@@ -1996,14 +2005,17 @@ function showFatal(msg) {
   const sp = document.querySelector('#loading .spin');
   if (sp) sp.style.display = 'none';
 }
+
 async function loadData() {
   // 1) Dados embutidos (data/summary.js) — cobre abrir com duplo clique.
+  //    Em produção autenticada o arquivo não é publicado, então este passo
+  //    e o seguinte simplesmente não acontecem lá.
   if (window.__SUMMARY__) {
     DATA = window.__SUMMARY__;
     startDashboard();
     return;
   }
-  // 2) Fallback: fetch do JSON servido junto do front.
+  // 2) Fallback dev: fetch do JSON servido junto do front.
   try {
     const res = await fetch('data/summary.json', { cache: 'no-store' });
     if (res.ok) {
@@ -2011,11 +2023,95 @@ async function loadData() {
       startDashboard();
       return;
     }
-  } catch (e) { /* segue para a mensagem de erro */ }
-  // 3) Nada disponível: explicar o que fazer.
+  } catch (e) { /* segue */ }
+  // 3) Produção com Supabase configurado → login (só senha; e-mail fixo).
+  if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+    showLogin();
+    return;
+  }
+  // 4) Nada disponível: explicar o que fazer.
   showFatal('Os dados ainda não chegaram até aqui. Se você abriu o arquivo pelo OneDrive, aguarde a ' +
     'sincronização da pasta terminar (botão direito → "Sempre manter neste dispositivo") e recarregue. ' +
     'Se estiver rodando local, suba um servidor na pasta dashboard (ex.: python -m http.server) e abra por ele.');
+}
+
+/* --- produção: Supabase Auth + bucket privado --- */
+function loadSupabaseLib() {
+  return new Promise((resolve, reject) => {
+    if (window.supabase) return resolve();
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Falha ao carregar supabase-js do CDN.'));
+    document.head.appendChild(s);
+  });
+}
+
+async function baixarSummary() {
+  const { data, error } = await sbClient.storage
+    .from(SUPABASE_BUCKET).download('summary.json');
+  if (error) throw error;
+  DATA = JSON.parse(await data.text());
+}
+
+function entrar() {
+  document.getElementById('login-screen').hidden = true;
+  startDashboard();
+}
+
+async function showLogin() {
+  document.getElementById('loading').hidden = true;
+  const tela = document.getElementById('login-screen');
+  tela.hidden = false;
+  // a marca do seletor serve de logo aqui também
+  const marca = document.querySelector('.brand-mark');
+  const alvo = tela.querySelector('.login-brand');
+  if (marca && alvo && !alvo.firstChild) alvo.appendChild(marca.cloneNode(true));
+
+  const err = document.getElementById('login-err');
+  const btn = document.getElementById('login-btn');
+  try {
+    await loadSupabaseLib();
+    sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // sessão guardada → pula o login; se o download falhar (sessão
+    // expirada), sai da sessão e volta pro login com aviso.
+    const { data } = await sbClient.auth.getSession();
+    if (data && data.session) {
+      try {
+        await baixarSummary();
+        entrar();
+        return;
+      } catch (e) {
+        try { await sbClient.auth.signOut(); } catch (_) { /* noop */ }
+        err.textContent = 'Sessão expirada — entre de novo.';
+      }
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Erro ao preparar o login.';
+  }
+
+  document.getElementById('login-form').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    err.textContent = '';
+    btn.disabled = true;
+    try {
+      if (!sbClient) {
+        await loadSupabaseLib();
+        sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      }
+      const password = document.getElementById('login-pass').value;
+      const { error } = await sbClient.auth.signInWithPassword(
+        { email: DASH_EMAIL, password });
+      if (error) throw new Error('Senha incorreta.');
+      await baixarSummary();
+      entrar();
+    } catch (e) {
+      err.textContent = e.message || 'Erro ao entrar.';
+      try { if (sbClient) await sbClient.auth.signOut(); } catch (_) { /* noop */ }
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 /* ============================================================

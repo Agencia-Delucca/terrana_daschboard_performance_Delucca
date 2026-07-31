@@ -491,3 +491,39 @@ body.mode-select #selector {
   .cols-hero-6 .kpi.hero { grid-column: span 2; }
   #content { padding: 14px; }
 }
+
+/* ---------- Login (produção com Supabase; invisível no dev) ---------- */
+#login-screen {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-page); padding: 24px;
+}
+#login-screen[hidden] { display: none; }
+.login-box {
+  width: 100%; max-width: 380px;
+  background: var(--bg-card); border: 1px solid var(--border-card);
+  border-radius: 14px; padding: 34px 30px 30px; text-align: center;
+}
+.login-box::before {
+  content: ""; display: block; height: 3px; margin: -34px -30px 26px;
+  border-radius: 14px 14px 0 0; background: var(--grad-kpi);
+}
+.login-brand img, .login-brand .brand-mark {
+  width: 54px; height: 54px; border-radius: 50%; margin-bottom: 12px;
+}
+.login-box h2 { font-size: 19px; font-weight: 800; margin-bottom: 4px; }
+.login-box .sub { color: var(--text-muted); font-size: 12.5px; margin-bottom: 22px; }
+.login-box input {
+  width: 100%; padding: 11px 12px; border-radius: 9px;
+  background: var(--track); border: 1px solid var(--border-card);
+  color: var(--text); font-family: inherit; font-size: 14px;
+}
+.login-box input:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+.login-box button {
+  width: 100%; padding: 11px; margin-top: 12px;
+  background: var(--grad-active); color: #241203; border: 0; border-radius: 9px;
+  font-family: inherit; font-size: 14px; font-weight: 800; cursor: pointer;
+}
+.login-box button:hover:not(:disabled) { filter: brightness(1.06); }
+.login-box button:disabled { opacity: .45; cursor: not-allowed; }
+.login-err { color: var(--red); font-size: 12.5px; min-height: 18px; margin-top: 12px; }
