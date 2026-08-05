@@ -362,6 +362,11 @@ td .muted { color: var(--text-muted); }
   background: var(--track); color: var(--text-muted);
   display: none; align-items: center; justify-content: center; flex: none;
 }
+/* variante 40px (tabela de campanhas institucionais) — fallback: quadrado com a inicial */
+.thumb.sm { width: 40px; height: 40px; }
+.thumb-fb.sm { width: 40px; height: 40px; font-weight: 700; font-size: 15px; }
+.camp-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
+.camp-link:hover span { text-decoration: underline; }
 
 /* ---------- funil ---------- */
 .funnel { margin-top: 6px; }

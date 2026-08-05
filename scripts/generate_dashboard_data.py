@@ -35,6 +35,17 @@ JACCARD_THRESHOLD = 0.4
 _TOKEN_STOP = {"anuncio", "ad", "ads", "de", "da", "do", "estatico", "animado",
                "video", "imagem", "post", "v1", "v2", "v3", "v4", "v5"}
 
+# Ordem do funil combinada com a gestora (05/08) — o sort do Kommo põe o
+# FOLLOW UP depois da negociação e isso confundia a leitura das taxas.
+FUNIL_ORDER = ["etapa de leads de entrada", "contato inicial", "em atendimento",
+               "follow up", "qualificados", "em negociação",
+               "fechado - ganho", "fechado - perdido"]
+
+
+def ordem_funil(etapa):
+    e = (etapa or "").strip().lower()
+    return FUNIL_ORDER.index(e) if e in FUNIL_ORDER else 900
+
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -70,6 +81,69 @@ def _tokens(s):
             if len(t) >= 3 and t not in _TOKEN_STOP}
 
 
+def _fone_norm(telefone):
+    """Só dígitos, sem o 55 do país — compara pelos últimos 8 (miolo do
+    número sobrevive a formatos com/sem 9º dígito)."""
+    d = re.sub(r"\D", "", telefone or "")
+    if d.startswith("55") and len(d) > 10:
+        d = d[2:]
+    return d[-8:] if len(d) >= 8 else ""
+
+
+def enriquecer_com_planilha(leads, contatos, planilha):
+    """Casa lead do CRM ↔ lead do formulário por e-mail/telefone e grava a
+    atribuição REAL (anúncio, conjunto, campanha, plataforma) no lead.
+
+    É o backfill de rastreamento que as UTMs não davam: a planilha recebe
+    cada envio do formulário com o criativo exato. Leads antigos (antes da
+    integração, 05/08) só casam se estiverem na planilha.
+    """
+    por_email = {}
+    por_fone = {}
+    for p in planilha:
+        if p.get("email"):
+            por_email.setdefault(p["email"], p)
+        f = _fone_norm(p.get("telefone"))
+        if f:
+            por_fone.setdefault(f, p)
+
+    casados = 0
+    for lead in leads:
+        contato = contatos.get(str(lead.get("contato_id") or "")) \
+            or contatos.get(lead.get("contato_id")) or {}
+        email = (contato.get("email") or "").lower()
+        fone = _fone_norm(contato.get("telefone"))
+        p = (email and por_email.get(email)) or (fone and por_fone.get(fone))
+        if not p:
+            continue
+        lead["form"] = {
+            "anuncio": p["anuncio"],
+            "conjunto": p["conjunto"],
+            "campanha": p["campanha"],
+            "plataforma": p["plataforma"],
+            "organico": p["organico"],
+            "tipo_negocio": p["tipo_negocio"],
+        }
+        casados += 1
+
+    stats = {"planilha_total": len(planilha), "casados_no_crm": casados}
+    print(f"  Planilha↔CRM: {casados} leads casados "
+          f"({len(planilha)} na planilha)")
+    return stats
+
+
+def origem_efetiva(lead):
+    """Origem mais confiável disponível: UTM > formulário > nada."""
+    if lead.get("utm_source"):
+        return lead["utm_source"]
+    form = lead.get("form")
+    if form:
+        plat = form.get("plataforma") or "meta"
+        return f"{plat} (formulário)" if not form.get("organico") \
+            else f"{plat} (formulário orgânico)"
+    return None
+
+
 def resolver_fontes(leads, meta_rows):
     """Marca lead['_fonte'] = 'meta' | 'google' | 'outro' | None.
 
@@ -95,15 +169,18 @@ def resolver_fontes(leads, meta_rows):
 
     for lead in leads:
         src = (lead.get("utm_source") or "").lower().strip()
+        form = lead.get("form")
         if src in config.PAID_SOURCES_META or lead.get("fbclid"):
             fonte = "meta"
         elif src in config.PAID_SOURCES_GOOGLE or lead.get("gclid"):
             fonte = "google"
+        elif form and not form.get("organico"):
+            fonte = "meta"          # formulário de anúncio = pago Meta
         elif not src and lead.get("utm_campaign") \
                 and campanha_meta(lead["utm_campaign"]):
             fonte = "meta"
-        elif src:
-            fonte = "outro"
+        elif src or form:
+            fonte = "outro"         # form orgânico conta como origem própria
         else:
             fonte = None
         lead["_fonte"] = fonte
@@ -140,15 +217,29 @@ def match_leads_meta(leads, meta_rows):
             pool[nome] = _tokens(nome)
 
     daily = defaultdict(lambda: defaultdict(int))
-    pagos = com_campaign = matched = 0
+    ad_daily = defaultdict(lambda: defaultdict(int))
+    pagos = via_form = via_utm = 0
     for lead in leads:
         if fonte_paga(lead) != "meta":
             continue
         pagos += 1
+        d = dia(lead.get("criado_em"))
+        form = lead.get("form")
+
+        # 1º) atribuição EXATA da planilha do formulário (campanha e
+        #     anúncio reais do lead — não precisa de matching por nome)
+        if form and form.get("campanha") \
+                and classificar_frente(form["campanha"]) == "b2b":
+            daily[form["campanha"]][d] += 1
+            if form.get("anuncio"):
+                ad_daily[form["anuncio"]][d] += 1
+            via_form += 1
+            continue
+
+        # 2º) fallback: utm_campaign × nome da campanha (Jaccard)
         campanha = lead.get("utm_campaign")
         if not campanha:
             continue
-        com_campaign += 1
         toks = _tokens(campanha)
         if not toks:
             continue
@@ -160,19 +251,21 @@ def match_leads_meta(leads, meta_rows):
             if score > best_score:
                 best, best_score = nome, score
         if best and best_score >= JACCARD_THRESHOLD:
-            daily[best][dia(lead.get("criado_em"))] += 1
-            matched += 1
+            daily[best][d] += 1
+            via_utm += 1
 
+    matched = via_form + via_utm
     stats = {
-        "nivel": "campanha",
+        "nivel": "campanha + criativo (formulário)",
         "leads_pagos_meta": pagos,
-        "com_utm_campaign": com_campaign,
+        "via_formulario": via_form,
+        "via_utm": via_utm,
         "matched": matched,
         "cobertura_pct": rnd(matched / pagos * 100, 1) if pagos else 0,
     }
-    print(f"  Matching Meta (nível campanha): {matched}/{pagos} leads pagos "
-          f"casados ({com_campaign} com utm_campaign)")
-    return daily, stats
+    print(f"  Matching Meta: {matched}/{pagos} pagos casados "
+          f"({via_form} pelo formulário, {via_utm} por UTM)")
+    return daily, ad_daily, stats
 
 
 # ----------------------------------------------------------------------
@@ -204,8 +297,9 @@ def aggregate_leads(leads):
             sem_utm += 1
             monthly[m]["sem_utm"] += 1
             daily[d]["sem_utm"] += 1
-        if lead.get("utm_source"):
-            by_source[lead["utm_source"]] += 1
+        origem = origem_efetiva(lead)
+        if origem:
+            by_source[origem] += 1
 
     return {
         "total": len(leads),
@@ -220,8 +314,26 @@ def aggregate_leads(leads):
     }
 
 
-def aggregate_crm(leads, statuses):
-    sort_por_etapa = {s["etapa"]: s.get("sort", 0) for s in statuses}
+def aggregate_crm(leads, statuses, events=None, contatos=None,
+                  expor_pessoais=False):
+    events = events or []
+    contatos = contatos or {}
+    etapa_por_id = {s["id"]: s["etapa"] for s in statuses}
+
+    # Histórico de etapas (lead_status_changed, janela de 180 dias):
+    # - última troca por lead → tempo parado na etapa atual;
+    # - troca PARA perdido (143) → etapa em que o lead estava ao ser perdido.
+    ultima_troca = {}
+    etapa_da_perda = {}
+    for ev in events:
+        if ev.get("type") != "lead_status_changed" or not ev.get("entity_id"):
+            continue
+        lid = ev["entity_id"]
+        ultima_troca[lid] = max(ultima_troca.get(lid, 0),
+                                ev.get("created_at") or 0)
+        if ev.get("status_after") == config.KOMMO_STATUS_PERDIDO \
+                and ev.get("status_before"):
+            etapa_da_perda[lid] = etapa_por_id.get(ev["status_before"])
     funnel = defaultdict(int)
     active = defaultdict(int)
     losses = defaultdict(int)
@@ -267,6 +379,8 @@ def aggregate_crm(leads, statuses):
                 "data": dia(lead.get("fechado_em")) or dia(lead.get("criado_em")),
                 "criado": dia(lead.get("criado_em")),
                 "motivo": motivo,
+                "etapa": etapa_da_perda.get(lead["id"]),
+                "origem": origem_efetiva(lead),
                 "utm_source": lead.get("utm_source"),
                 "utm_campaign": lead.get("utm_campaign"),
                 "utm_content": lead.get("utm_content"),
@@ -278,7 +392,55 @@ def aggregate_crm(leads, statuses):
     n = len(ciclos)
     total = len(leads)
     fechados = won + lost
+
+    # --- Tempo parado por etapa (leads vivos) + leads parados individuais --
+    agora_ts = datetime.now(BRT).timestamp()
+    dias_por_etapa = defaultdict(list)
+    parados = []
+    for lead in leads:
+        if lead.get("ganho") or lead.get("perdido") or not lead.get("criado_em"):
+            continue
+        criado_ts = datetime.fromisoformat(lead["criado_em"]).timestamp()
+        ref = ultima_troca.get(lead["id"]) or criado_ts
+        dias = (agora_ts - ref) / 86400
+        dias_por_etapa[lead.get("etapa", "?")].append(dias)
+        contato = contatos.get(str(lead.get("contato_id") or "")) \
+            or contatos.get(lead.get("contato_id")) or {}
+        parados.append({
+            "nome": lead.get("nome") or contato.get("nome") or "(sem nome)",
+            "telefone": contato.get("telefone") or "—",
+            "etapa": lead.get("etapa", "?"),
+            "dias": rnd(dias, 1),
+            "responsavel": lead.get("responsavel") or "—",
+        })
+
+    def _mediana(vals):
+        vals = sorted(vals)
+        return rnd(vals[len(vals) // 2], 1) if vals else None
+
+    tempo_etapa = sorted(
+        [{"etapa": k, "dias_mediana": _mediana(v), "leads": len(v),
+          "sort": ordem_funil(k)}
+         for k, v in dias_por_etapa.items()], key=lambda x: x["sort"])
+
+    # Nome e telefone são dados pessoais: só vão para o summary quando a
+    # publicação for autenticada (Supabase configurado). Antes disso o site
+    # é público e isso seria expor PII na internet.
+    if expor_pessoais:
+        leads_parados = {"disponivel": True,
+                         "itens": sorted(parados, key=lambda x: -x["dias"])[:30]}
+    else:
+        leads_parados = {
+            "disponivel": False,
+            "motivo": "Nome e telefone de leads são dados pessoais — esta "
+                      "lista só é publicada quando o dashboard estiver com "
+                      "login ativo (Supabase). Os tempos por etapa acima já "
+                      "estão habilitados.",
+        }
+
     return {
+        "tempo_etapa": tempo_etapa,
+        "leads_parados": leads_parados,
         "total_deals": total,
         "total_won": won,
         "total_lost": lost,
@@ -287,10 +449,10 @@ def aggregate_crm(leads, statuses):
         "taxa_fechamento": rnd(won / total * 100, 1) if total else 0,
         "taxa_fechamento_decididos": rnd(won / fechados * 100, 1) if fechados else 0,
         "funnel": sorted(
-            [{"etapa": k, "total": v, "sort": sort_por_etapa.get(k, 9999)}
+            [{"etapa": k, "total": v, "sort": ordem_funil(k)}
              for k, v in funnel.items()], key=lambda x: x["sort"]),
         "active_funnel": sorted(
-            [{"etapa": k, "total": v, "sort": sort_por_etapa.get(k, 9999)}
+            [{"etapa": k, "total": v, "sort": ordem_funil(k)}
              for k, v in active.items()], key=lambda x: x["sort"]),
         "deals_minimal": deals_minimal,
         "losses": sorted([{"motivo": k, "total": v} for k, v in losses.items()],
@@ -377,7 +539,8 @@ def aggregate_atendimento(events, talks):
     }
 
 
-def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
+def aggregate_meta_ads(rows, leads_daily_map, campaign_status,
+                       ad_daily_map=None):
     monthly = defaultdict(lambda: defaultdict(float))
     daily = defaultdict(lambda: defaultdict(float))
     camp_day = defaultdict(lambda: defaultdict(float))     # (campanha, dia)
@@ -393,6 +556,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
             b["gasto"] += r["gasto"]
             b["impressoes"] += r["impressoes"]
             b["cliques"] += r["cliques"]
+            b["cliques_link"] += r.get("cliques_link", 0)
             b["leads_plat"] += r["leads_plat"]
             b["conversas"] += r["conversas"]
             b["compras"] += r.get("compras", 0)
@@ -402,6 +566,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         cd["gasto"] += r["gasto"]
         cd["impressoes"] += r["impressoes"]
         cd["cliques"] += r["cliques"]
+        cd["cliques_link"] += r.get("cliques_link", 0)
         cd["leads_plat"] += r["leads_plat"]
         cd["conversas"] += r["conversas"]
         cd["compras"] += r.get("compras", 0)
@@ -410,6 +575,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         ad_ = adset_day[(camp, conj, d)]
         ad_["gasto"] += r["gasto"]
         ad_["cliques"] += r["cliques"]
+        ad_["cliques_link"] += r.get("cliques_link", 0)
         ad_["leads_plat"] += r["leads_plat"]
         ad_["conversas"] += r["conversas"]
         ad_["compras"] += r.get("compras", 0)
@@ -418,6 +584,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         crd = cre_day[(ad, camp, d)]
         crd["gasto"] += r["gasto"]
         crd["cliques"] += r["cliques"]
+        crd["cliques_link"] += r.get("cliques_link", 0)
         crd["leads_plat"] += r["leads_plat"]
         crd["conversas"] += r["conversas"]
         crd["compras"] += r.get("compras", 0)
@@ -425,7 +592,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
 
         cre = creatives.setdefault(ad, {
             "anuncio": ad, "campanha": camp, "conjunto": conj,
-            "gasto": 0.0, "impressoes": 0, "cliques": 0, "leads_plat": 0,
+            "gasto": 0.0, "impressoes": 0, "cliques": 0, "cliques_link": 0, "leads_plat": 0,
             "conversas": 0, "compras": 0, "valor_compras": 0.0, "thumbnail": r.get("thumbnail", ""),
             "permalink": r.get("permalink", ""), "primeira_data": d,
             "ultima_data": d,
@@ -433,6 +600,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         cre["gasto"] += r["gasto"]
         cre["impressoes"] += r["impressoes"]
         cre["cliques"] += r["cliques"]
+        cre["cliques_link"] += r.get("cliques_link", 0)
         cre["leads_plat"] += r["leads_plat"]
         cre["conversas"] += r["conversas"]
         cre["compras"] += r.get("compras", 0)
@@ -443,7 +611,7 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
         cre["primeira_data"] = min(cre["primeira_data"], d)
 
     # --- Leads do CRM casados no nível campanha (ver match_leads_meta) ---
-    # O lead cai no dia em que foi criado, na campanha que o utm_campaign
+    # O lead cai no dia em que foi criado, na campanha que a atribuição
     # aponta — mesmo que a campanha não tenha tido entrega naquele dia.
     total_matched = 0
     for campanha, dias in leads_daily_map.items():
@@ -451,6 +619,20 @@ def aggregate_meta_ads(rows, leads_daily_map, campaign_status):
             camp_day[(campanha, d)]["leads"] = \
                 camp_day[(campanha, d)].get("leads", 0) + n
             total_matched += n
+
+    # --- Leads por CRIATIVO (atribuição exata da planilha do formulário) --
+    for anuncio, dias in (ad_daily_map or {}).items():
+        cre = creatives.get(anuncio)
+        if cre is None:
+            # anúncio ainda sem entrega na série coletada — cria casca
+            cre = creatives.setdefault(anuncio, {
+                "anuncio": anuncio, "campanha": "", "conjunto": "",
+                "gasto": 0.0, "impressoes": 0, "cliques": 0, "cliques_link": 0, "leads_plat": 0,
+                "conversas": 0, "compras": 0, "valor_compras": 0.0,
+                "thumbnail": "", "permalink": "",
+                "primeira_data": "", "ultima_data": "",
+            })
+        cre["leads_form"] = cre.get("leads_form", 0) + sum(dias.values())
 
     # --- Montagem das saídas -------------------------------------------
     def fecha(bucket, chave):
@@ -567,18 +749,27 @@ def aggregate_institucional(meta_rows, campaign_status):
     monthly = defaultdict(lambda: defaultdict(float))
     campanhas = defaultdict(lambda: defaultdict(float))
     split = defaultdict(float)
+    # thumbnail/permalink do anúncio de maior gasto de cada campanha —
+    # habilita o preview do criativo com link pro post no Instagram
+    midia = {}
+    midia_gasto = defaultdict(float)
 
     for r in meta_rows:
         frente = classificar_frente(r["campanha"])
         split[frente] += r["gasto"]
         if frente != "inst":
             continue
+        if r.get("thumbnail") and r["gasto"] >= midia_gasto[r["campanha"]]:
+            midia_gasto[r["campanha"]] = r["gasto"]
+            midia[r["campanha"]] = {"thumbnail": r.get("thumbnail", ""),
+                                    "permalink": r.get("permalink", "")}
         m = r["data"][:7]
         for bucket, key in ((monthly, m), (campanhas, r["campanha"])):
             b = bucket[key]
             b["gasto"] += r["gasto"]
             b["impressoes"] += r["impressoes"]
             b["cliques"] += r["cliques"]
+            b["cliques_link"] += r.get("cliques_link", 0)
             b["engajamento"] += r.get("engajamento", 0)
             b["video_views"] += r.get("video_views", 0)
             b["seguidores"] += r.get("seguidores", 0)
@@ -592,7 +783,9 @@ def aggregate_institucional(meta_rows, campaign_status):
         "monthly": [{"mes": k, **fecha(v)} for k, v in sorted(monthly.items())],
         "campaigns": sorted(
             [{"campanha": k, **fecha(v),
-              "status": campaign_status.get(k, "")}
+              "status": campaign_status.get(k, ""),
+              "thumbnail": midia.get(k, {}).get("thumbnail", ""),
+              "permalink": midia.get(k, {}).get("permalink", "")}
              for k, v in campanhas.items()],
             key=lambda x: -x["gasto"]),
     }
@@ -770,9 +963,15 @@ def aggregate_utm(leads):
         elif lead.get("perdido"):
             p["perdidos"] += 1
 
+    com_atrib = sum(1 for lead in leads if origem_efetiva(lead))
     return {
         "cobertura": {"total": total, "com_utm": com_utm,
                       "pct": rnd(com_utm / total * 100, 1) if total else 0},
+        "cobertura_efetiva": {
+            "total": total, "com_atribuicao": com_atrib,
+            "pct": rnd(com_atrib / total * 100, 1) if total else 0,
+            "nota": "UTM ou casamento com a planilha do formulário",
+        },
         **dims,
         "campaigns_perf": sorted(
             [{"campanha": k, **v,
@@ -881,11 +1080,19 @@ def main():
         print("::error::Sem leads do Kommo — abortando ETL.")
         sys.exit(1)
 
+    contatos = ler("kommo_contacts") or {}
+    planilha = ler("form_sheet") or []
+    form_stats = enriquecer_com_planilha(leads, contatos, planilha)
     resolver_fontes(leads, meta_rows)
-    leads_daily_map, matching_stats = match_leads_meta(leads, meta_rows)
+    leads_daily_map, ad_daily_map, matching_stats = \
+        match_leads_meta(leads, meta_rows)
+    matching_stats.update(form_stats)
+
+    # PII (nome/telefone dos leads parados) só sai com publicação autenticada
+    expor_pessoais = bool(config.SUPABASE_SERVICE_KEY)
 
     leads_agg = aggregate_leads(leads)
-    crm = aggregate_crm(leads, statuses)
+    crm = aggregate_crm(leads, statuses, events, contatos, expor_pessoais)
     atendimento = aggregate_atendimento(events, talks)
 
     # Duas frentes: B2B Atacado (leads via CRM) e E-commerce (venda direta).
@@ -894,8 +1101,8 @@ def main():
                 if classificar_frente(r["campanha"]) == "b2b"]
     rows_ecom = [r for r in meta_rows
                  if classificar_frente(r["campanha"]) == "ecommerce"]
-    meta_b2b = aggregate_meta_ads(rows_b2b, leads_daily_map, meta_status) \
-        if rows_b2b else None
+    meta_b2b = aggregate_meta_ads(rows_b2b, leads_daily_map, meta_status,
+                                  ad_daily_map) if rows_b2b else None
     if meta_b2b:
         meta_b2b["matching"] = matching_stats
     meta_ecom = aggregate_meta_ads(rows_ecom, {}, meta_status) \

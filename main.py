@@ -11,7 +11,7 @@ import os
 import sys
 
 import config
-from collectors import google_ads, kommo, meta_ads_api
+from collectors import form_sheet, google_ads, kommo, meta_ads_api
 
 
 def salvar(nome, payload):
@@ -41,8 +41,12 @@ def main():
         sys.exit(1)
     salvar("kommo_statuses", statuses)
     salvar("kommo_leads", leads)
+    salvar("kommo_contacts", kommo.get_contacts(client))
     salvar("kommo_talks", kommo.get_talks(client))
     salvar("kommo_events", kommo.get_events(client))
+
+    print("Planilha do formulário...")
+    salvar("form_sheet", form_sheet.get_leads_formulario())
 
     print("Meta Ads...")
     meta_rows = meta_ads_api.get_ad_insights_daily()

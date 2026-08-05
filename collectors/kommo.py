@@ -171,6 +171,33 @@ def get_structure(client):
     return statuses, users
 
 
+def _contato_principal(lead):
+    contatos = (lead.get("_embedded") or {}).get("contacts") or []
+    for c in contatos:
+        if c.get("is_main"):
+            return c["id"]
+    return contatos[0]["id"] if contatos else None
+
+
+def get_contacts(client):
+    """{contact_id: {nome, telefone, email}} — chave do matching com a
+    planilha do formulário (telefone/e-mail ficam em custom fields)."""
+    out = {}
+    for c in client.paginate("contacts", {"with": "leads"}):
+        telefone = email = ""
+        for f in c.get("custom_fields_values") or []:
+            code = (f.get("field_code") or "").upper()
+            valores = f.get("values") or []
+            if code == "PHONE" and valores:
+                telefone = str(valores[0].get("value") or "")
+            elif code == "EMAIL" and valores:
+                email = str(valores[0].get("value") or "").lower()
+        out[c["id"]] = {"nome": c.get("name", ""),
+                        "telefone": telefone, "email": email}
+    print(f"  Kommo: {len(out)} contatos (telefone/e-mail)")
+    return out
+
+
 def get_leads(client, statuses, users):
     """1 registro por lead, já no contrato 1.1 (lead=deal no Kommo)."""
     etapa_por_id = {s["id"]: s["etapa"] for s in statuses}
@@ -181,6 +208,7 @@ def get_leads(client, statuses, users):
         perdido = status_id == config.KOMMO_STATUS_PERDIDO
         rows.append({
             "id": lead["id"],
+            "contato_id": _contato_principal(lead),
             "nome": lead.get("name", ""),
             "etapa": etapa_por_id.get(status_id, f"status {status_id}"),
             "etapa_id": status_id,
