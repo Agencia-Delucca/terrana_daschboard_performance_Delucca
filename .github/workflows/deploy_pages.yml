@@ -1,10 +1,9 @@
 name: Deploy Dashboard (GitHub Pages)
 
-# Ponte enquanto os deploys da Netlify estão pausados (créditos do time).
-# Coleta os dados na hora e publica o front COM os dados embutidos —
-# modelo sem login escolhido pelo cliente para esta fase. Quando a fase
-# de autenticação chegar: voltar a remover dashboard/data/* do artefato
-# e ligar o Supabase (ver README).
+# Hospedagem OFICIAL do dashboard (decisão de 05/08/2026 — Netlify saiu
+# do projeto). Coleta os dados na hora e publica o front COM os dados
+# embutidos — modelo sem login desta fase. Quando o Supabase entrar, o
+# passo condicional abaixo remove os dados do artefato automaticamente.
 
 on:
   push:

@@ -1,6 +1,0 @@
-# Deploy Netlify — site estático, sem build.
-# O painel publica a pasta dashboard/ como raiz do site.
-
-[build]
-  publish = "dashboard"
-  command = ""
