@@ -67,6 +67,16 @@ jobs:
           GOOGLE_SA_JSON_B64: ${{ secrets.GOOGLE_SA_JSON_B64 }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Metas e orçamentos (Settings → Secrets and variables → Variables)
+          TICKET_MEDIO: ${{ vars.TICKET_MEDIO }}
+          CPL_TARGET_META: ${{ vars.CPL_TARGET_META }}
+          CPL_TARGET_GOOGLE: ${{ vars.CPL_TARGET_GOOGLE }}
+          CPA_TARGET_ECOM: ${{ vars.CPA_TARGET_ECOM }}
+          ROAS_TARGET_ECOM: ${{ vars.ROAS_TARGET_ECOM }}
+          ORCAMENTO_META_B2B: ${{ vars.ORCAMENTO_META_B2B }}
+          ORCAMENTO_META_ECOM: ${{ vars.ORCAMENTO_META_ECOM }}
+          ORCAMENTO_GOOGLE_ECOM: ${{ vars.ORCAMENTO_GOOGLE_ECOM }}
+          ORCAMENTO_GOOGLE_B2B: ${{ vars.ORCAMENTO_GOOGLE_B2B }}
         run: |
           python -u main.py
           python -u scripts/generate_dashboard_data.py

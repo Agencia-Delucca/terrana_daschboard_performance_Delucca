@@ -42,10 +42,19 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 # como estimativa. 0 = esconder indicadores de receita.
 TICKET_MEDIO = float(os.getenv("TICKET_MEDIO", "0") or 0)
 
-# Metas de CPL (R$). 0 = régua de qualidade desligada até a meta ser
-# definida com o cliente — o front mostra "meta não definida", nunca chuta.
+# Metas de custo (R$). 0 = régua desligada até a meta ser definida com o
+# cliente — o front mostra "meta não definida", nunca chuta.
 CPL_TARGET_META = float(os.getenv("CPL_TARGET_META", "0") or 0)
 CPL_TARGET_GOOGLE = float(os.getenv("CPL_TARGET_GOOGLE", "0") or 0)
+CPA_TARGET_ECOM = float(os.getenv("CPA_TARGET_ECOM", "0") or 0)
+ROAS_TARGET_ECOM = float(os.getenv("ROAS_TARGET_ECOM", "0") or 0)
+
+# Orçamentos mensais por frente/plataforma (R$/mês). 0 = sem orçamento
+# definido — o card de saldo/projeção mostra estado honesto até definirem.
+ORCAMENTO_META_B2B = float(os.getenv("ORCAMENTO_META_B2B", "0") or 0)
+ORCAMENTO_META_ECOM = float(os.getenv("ORCAMENTO_META_ECOM", "0") or 0)
+ORCAMENTO_GOOGLE_ECOM = float(os.getenv("ORCAMENTO_GOOGLE_ECOM", "0") or 0)
+ORCAMENTO_GOOGLE_B2B = float(os.getenv("ORCAMENTO_GOOGLE_B2B", "0") or 0)
 
 # --- Classificação de origem paga (editar conforme as UTMs reais) -------
 # utm_source que conta como tráfego pago de cada plataforma, minúsculo.

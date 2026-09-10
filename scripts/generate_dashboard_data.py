@@ -980,6 +980,94 @@ def aggregate_utm(leads):
     }
 
 
+def build_otimizacao(meta_agg, google_agg, frente):
+    """Seção 'Dashboard de Otimização' da Visão Geral (padrão CDC):
+    ciclo de gasto do mês, histórico mensal unificado por plataforma e
+    rankings de criativos (eficientes × dinheiro sem retorno).
+
+    Metas/orçamentos vêm do config (summary.config) e a régua na-meta/fora
+    é aplicada no front — 0 = 'não definido', estado honesto.
+    """
+    agora = datetime.now(BRT)
+    ciclo_ini = agora.strftime("%Y-%m-01")
+    dias_no_mes = (datetime(agora.year + (agora.month == 12),
+                            (agora.month % 12) + 1, 1, tzinfo=BRT)
+                   - datetime(agora.year, agora.month, 1, tzinfo=BRT)).days
+    dias_passados = agora.day
+
+    def _ok(agg):
+        return agg and agg.get("disponivel", True) and agg.get("daily")
+
+    def gasto_ciclo(agg):
+        if not _ok(agg):
+            return 0.0
+        return sum(d.get("gasto", 0) for d in agg["daily"]
+                   if d["dia"] >= ciclo_ini)
+
+    g_meta = gasto_ciclo(meta_agg)
+    g_google = gasto_ciclo(google_agg)
+    total = g_meta + g_google
+    ritmo = total / dias_passados if dias_passados else 0
+    projecao = ritmo * dias_no_mes
+
+    # Histórico mensal unificado (colunas por plataforma; front escolhe
+    # as colunas conforme a frente)
+    meses = {}
+    if _ok(meta_agg):
+        for m in meta_agg.get("monthly", []):
+            meses.setdefault(m["mes"], {})["meta"] = m
+    if _ok(google_agg):
+        for m in google_agg.get("monthly", []):
+            meses.setdefault(m["mes"], {})["google"] = m
+    mes_atual = agora.strftime("%Y-%m")
+    monthly_hist = [{"mes": k, "parcial": k == mes_atual, **v}
+                    for k, v in sorted(meses.items())]
+
+    # Rankings de criativos (só Meta tem criativo nomeado/thumbnail)
+    eficientes, zero = [], []
+    total_zero = 0.0
+    if meta_agg:
+        for c in meta_agg.get("creatives", []):
+            resultado = (c.get("compras", 0) if frente == "ecommerce"
+                         else (c.get("leads_form") or 0)
+                         or 0)
+            fallback = c.get("conversas", 0)
+            item = {
+                "anuncio": c["anuncio"],
+                "campanha": c.get("campanha", ""),
+                "gasto": c.get("gasto", 0),
+                "resultado": resultado,
+                "resultado_fallback": fallback,
+                "thumbnail": c.get("thumbnail", ""),
+                "permalink": c.get("permalink", ""),
+            }
+            if c.get("gasto", 0) > 10 and resultado == 0 and fallback == 0:
+                total_zero += c.get("gasto", 0)
+                zero.append(item)
+            elif resultado >= (1 if frente == "ecommerce" else 3):
+                item["custo_por_resultado"] = rnd(c["gasto"] / resultado) \
+                    if c.get("gasto") else 0
+                eficientes.append(item)
+    eficientes.sort(key=lambda x: x["custo_por_resultado"])
+    zero.sort(key=lambda x: -x["gasto"])
+
+    return {
+        "ciclo": {
+            "inicio": ciclo_ini,
+            "dias_no_mes": dias_no_mes,
+            "dias_passados": dias_passados,
+            "gasto_meta": rnd(g_meta),
+            "gasto_google": rnd(g_google),
+            "gasto_total": rnd(total),
+            "ritmo_dia": rnd(ritmo),
+            "projecao_mes": rnd(projecao),
+        },
+        "monthly_hist": monthly_hist,
+        "criativos_eficientes": eficientes[:6],
+        "zero_retorno": {"total_gasto": rnd(total_zero), "itens": zero[:6]},
+    }
+
+
 def build_relatorio(leads_agg, crm, meta, atendimento, utm):
     """Snapshot do mês corrente + saúde do rastreamento + alertas."""
     agora = datetime.now(BRT)
@@ -1137,6 +1225,12 @@ def main():
             "ticket_medio": config.TICKET_MEDIO,
             "cpl_target_meta": config.CPL_TARGET_META,
             "cpl_target_google": config.CPL_TARGET_GOOGLE,
+            "cpa_target_ecom": config.CPA_TARGET_ECOM,
+            "roas_target_ecom": config.ROAS_TARGET_ECOM,
+            "orcamento_meta_b2b": config.ORCAMENTO_META_B2B,
+            "orcamento_meta_ecom": config.ORCAMENTO_META_ECOM,
+            "orcamento_google_ecom": config.ORCAMENTO_GOOGLE_ECOM,
+            "orcamento_google_b2b": config.ORCAMENTO_GOOGLE_B2B,
         },
         "leads": leads_agg,
         "crm": crm,
@@ -1146,6 +1240,9 @@ def main():
         "google_b2b": google_b2b,
         "google_ecom": google_ecom,
         "utm": utm,
+        "otimizacao_b2b": build_otimizacao(meta_b2b, google_b2b, "b2b"),
+        "otimizacao_ecom": build_otimizacao(meta_ecom, google_ecom,
+                                            "ecommerce"),
         "institucional": aggregate_institucional(meta_rows, meta_status)
         if meta_rows else None,
         "publico": aggregate_publico(meta_breakdowns),

@@ -186,14 +186,35 @@ function banner(kind, html) {
     (kind === 'amber' ? '<span class="b-ic">⚠</span>' : '') +
     '<div>' + html + '</div></div>';
 }
-/* Os 2 primeiros alertas do ETL são os banners âmbar padrão das páginas B2B;
-   a Visão Geral B2B mostra a lista completa. (Os alertas descrevem CRM/UTM —
-   não se aplicam ao painel E-commerce.) */
-function qualityBanners(all) {
+/* ---------- Qualidade dos dados ----------
+   Os avisos âmbar (relatorio.alertas) saíram do topo das páginas e moram na
+   página "Qualidade dos dados" de cada painel. A Visão Geral mostra só um
+   chip discreto linkando pra lá. */
+const ALERT_META = {
+  rastreamento: {
+    titulo: 'Rastreamento (UTM)',
+    fazer: 'Parametrizar todos os links de anúncio, bio e formulários com utm_source, utm_medium e utm_campaign — e usar utm_content={{ad.name}} no Meta. O passo a passo está na página Rastreamento (UTM) do painel B2B.'
+  },
+  valor: {
+    titulo: 'Valores no CRM',
+    fazer: 'Preencher o campo "Valor" dos negócios no Kommo. Com valor real, o painel passa a mostrar receita, ticket médio e valor em negociação por etapa — hoje qualquer número de dinheiro é estimativa.'
+  },
+  atendimento: {
+    titulo: 'Resposta automática',
+    fazer: 'Nada a corrigir nos dados — é um aviso de leitura: os tempos de resposta do painel medem a espera por uma pessoa, com o robô excluído das medianas.'
+  }
+};
+function alertMeta(tipo) {
+  return Object.prototype.hasOwnProperty.call(ALERT_META, tipo)
+    ? ALERT_META[tipo]
+    : { titulo: tipo ? tipo.charAt(0).toUpperCase() + tipo.slice(1) : 'Aviso de qualidade', fazer: 'Verifique a coleta desse dado no ETL e na origem (CRM/plataforma).' };
+}
+function qualityChip(front) {
   const alertas = (DATA.relatorio && DATA.relatorio.alertas) || [];
-  const list = all ? alertas : alertas.slice(0, 2);
-  if (!list.length) return '';
-  return '<div class="banners">' + list.map(a => banner('amber', esc(a.texto))).join('') + '</div>';
+  if (!alertas.length) return '';
+  return '<div class="q-chip-row"><a class="q-chip" href="#' + front + '/qualidade">🩺 ' +
+    fmt.num(alertas.length) + (alertas.length === 1 ? ' observação' : ' observações') +
+    ' de dados</a></div>';
 }
 function emptyDashed(l1, l2) {
   return '<div class="empty-dashed"><div class="l1">' + l1 + '</div>' +
@@ -473,7 +494,8 @@ const FRONTS = {
       { id: 'google', label: 'Google Ads', ic: '🔍', render: el => renderGoogleAds(el, 'b2b') },
       { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'b2b') },
       { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoB2B },
-      { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM }
+      { id: 'utm', label: 'Rastreamento (UTM)', ic: '🧭', render: renderUTM },
+      { id: 'qualidade', label: 'Qualidade dos dados', ic: '🩺', render: el => renderQualidade(el, 'b2b') }
     ]
   },
   ecom: {
@@ -487,7 +509,8 @@ const FRONTS = {
       { id: 'google', label: 'Google Ads', ic: '🔍', render: el => renderGoogleAds(el, 'ecom') },
       { id: 'institucional', label: 'Institucional & Impulsionamento', ic: '📣', render: renderInstitucional },
       { id: 'publico', label: 'Público', ic: '👥', render: el => renderPublico(el, 'ecom') },
-      { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoEcom }
+      { id: 'evolucao', label: 'Evolução Mensal', ic: '📈', render: renderEvolucaoEcom },
+      { id: 'qualidade', label: 'Qualidade dos dados', ic: '🩺', render: el => renderQualidade(el, 'ecom') }
     ]
   }
 };
@@ -647,11 +670,579 @@ function buildFilterUI() {
 }
 
 /* ============================================================
-   B2B · VISÃO GERAL
+   VISÃO GERAL = DASHBOARD DE OTIMIZAÇÃO (compartilhada B2B/ECOM)
+   Estrutura do projeto-base CDC com a identidade Terrana:
+   1 controle de investimento (ciclo) · 2 volume e eficiência do
+   período · 3 evolução diária · 4 histórico mensal · 5 onde está
+   o resultado · 6 ações · conteúdo anterior preservado no fim.
+   Orçamentos e metas a 0 = "não definido" — estado honesto SEMPRE.
    ============================================================ */
-function renderVisaoB2B(el) {
+/* Gasto Google no gráfico empilhado: tom derivado da terracota (Meta fica
+   na terracota cheia) — sempre acompanhado de legenda. */
+const GOOGLE_INV = '#C4703C';
+/* Conversões Google no empilhado de resultados: tom derivado da oliva
+   (compras Meta ficam na oliva cheia) — sempre acompanhado de legenda. */
+const GOOGLE_RES = '#9DBE6A';
+
+function otCfg(front) {
+  const cfg = DATA.config || {};
+  if (front === 'b2b') {
+    return {
+      front, ot: DATA.otimizacao_b2b || {},
+      orcMeta: cfg.orcamento_meta_b2b || 0,
+      orcGoogle: cfg.orcamento_google_b2b || 0,
+      varsOrc: 'ORCAMENTO_META_B2B e ORCAMENTO_GOOGLE_B2B',
+      target: cfg.cpl_target_meta || 0,
+      varTarget: 'CPL_TARGET_META',
+      resNome: 'lead'
+    };
+  }
+  return {
+    front, ot: DATA.otimizacao_ecom || {},
+    orcMeta: cfg.orcamento_meta_ecom || 0,
+    orcGoogle: cfg.orcamento_google_ecom || 0,
+    varsOrc: 'ORCAMENTO_META_ECOM e ORCAMENTO_GOOGLE_ECOM',
+    target: cfg.cpa_target_ecom || 0,
+    varTarget: 'CPA_TARGET_ECOM',
+    resNome: 'resultado'
+  };
+}
+function secTitle(txt, sub) {
+  return '<h2 class="sec-title">' + txt + (sub ? ' <span>— ' + sub + '</span>' : '') + '</h2>';
+}
+function pbar(pct, danger) {
+  const w = Math.max(0, Math.min(100, pct || 0));
+  return '<div class="pbar' + (danger ? ' danger' : '') + '"><span style="width:' + w + '%"></span></div>';
+}
+function metaBadgeCusto(custo, target) {
+  if (!target) return '<span class="badge gray">meta não definida</span>';
+  if (custo == null) return '<span class="badge gray">sem resultados</span>';
+  return custo <= target
+    ? '<span class="badge green">na meta</span>'
+    : '<span class="badge red">acima da meta</span>';
+}
+function dayIdx(rows, field) {
+  const m = Object.create(null);
+  (rows || []).forEach(r => { if (r.dia) m[r.dia] = (m[r.dia] || 0) + (r[field] || 0); });
+  return m;
+}
+
+/* ---------- Cabeçalho da página (período · comparação · atualização) ---------- */
+function otHeaderHtml(front) {
+  const n = dayRange(FILTER.start, FILTER.end).length;
+  const prevStart = addDays(FILTER.start, -n), prevEnd = addDays(FILTER.start, -1);
+  return '<div class="page-context">Período: <strong>' + periodLabel() + '</strong> · Comparado com: ' +
+    fmt.dateFull(prevStart) + ' a ' + fmt.dateFull(prevEnd) + ' (período anterior de mesmo tamanho) · Atualizado em ' +
+    esc(DATA.last_update || '—') + '</div>' + qualityChip(front);
+}
+
+/* ---------- 1 · Controle de investimento (ciclo mensal) ---------- */
+function otCicloHtml(c) {
+  const ci = c.ot.ciclo || {};
+  const orcTotal = c.orcMeta + c.orcGoogle;
+  const fim = ci.inicio ? addDays(ci.inicio, (ci.dias_no_mes || 30) - 1) : null;
+  const diasRest = Math.max(0, (ci.dias_no_mes || 0) - (ci.dias_passados || 0));
+
+  // --- Saldo em conta ---
+  let cardSaldo;
+  if (orcTotal > 0) {
+    const saldo = orcTotal - (ci.gasto_total || 0);
+    const pctUso = (ci.gasto_total || 0) / orcTotal * 100;
+    const pctMes = (ci.dias_no_mes || 0) > 0 ? (ci.dias_passados || 0) / ci.dias_no_mes * 100 : 0;
+    const ok = pctUso <= pctMes + 8;   // uso até ~o ritmo do calendário
+    const sub = (plat, gasto, orc) => orc > 0
+      ? '<div class="sb-row"><span class="sb-lb">' + plat + '</span>' + pbar(gasto / orc * 100, gasto > orc) +
+      '<span class="sb-vl">' + fmt.moneyShort(gasto) + ' / ' + fmt.moneyShort(orc) + '</span></div>'
+      : '<div class="sb-row"><span class="sb-lb">' + plat + '</span><span class="sb-vl">orçamento não definido · gasto ' + fmt.moneyShort(gasto) + '</span></div>';
+    cardSaldo = card('Saldo em conta', 'orçamento do mês − gasto do ciclo',
+      '<div class="big-money">' + fmt.currency(saldo) + '</div>' +
+      pbar(pctUso, pctUso > 100) +
+      '<div class="ctx-line">' + fmt.currency(ci.gasto_total || 0) + ' gastos de ' + fmt.currency(orcTotal) + ' — ' + fmt.pct(pctUso, 0) + ' usado ' +
+      (ok ? '<span class="badge green">na meta</span>' : '<span class="badge red">atenção</span>') + '</div>' +
+      sub('Meta Ads', ci.gasto_meta || 0, c.orcMeta) +
+      sub('Google Ads', ci.gasto_google || 0, c.orcGoogle));
+  } else {
+    cardSaldo = card('Saldo em conta', 'orçamento do mês − gasto do ciclo',
+      emptyDashed('Orçamento mensal não definido.',
+        'Defina ' + c.varsOrc + ' nas Variables do repositório para habilitar este card. ' +
+        'Gasto do ciclo até aqui: ' + fmt.currency(ci.gasto_total || 0) + '.'));
+  }
+
+  // --- Ritmo de gasto ---
+  // Sem ciclo no resumo, nada de zeros fabricados: estado honesto.
+  let cardRitmo;
+  if (!ci.inicio) {
+    cardRitmo = card('Ritmo de gasto', 'ciclo atual · Meta + Google',
+      emptyDashed('Sem dados do ciclo atual.',
+        'O resumo ainda não trouxe o ciclo do mês — verifique a próxima atualização dos dados.'));
+  } else {
+    let ritmoBody = '<div class="big-money">' + fmt.currency(ci.ritmo_dia || 0) + '<span class="bm-unit">/dia</span></div>' +
+      '<div class="ctx-line">Ciclo ' + fmt.dateFull(ci.inicio) + ' a ' + fmt.dateFull(fim) +
+      ' · dia ' + fmt.num(ci.dias_passados) + ' de ' + fmt.num(ci.dias_no_mes) + '</div>' +
+      '<div class="ctx-line">Projeção do mês: <strong>' + fmt.currency(ci.projecao_mes || 0) + '</strong></div>';
+    if (orcTotal > 0) {
+      const restante = Math.max(0, orcTotal - (ci.gasto_total || 0));
+      const rd = diasRest > 0 ? restante / diasRest : null;
+      const cabe = (ci.projecao_mes || 0) <= orcTotal;
+      ritmoBody += '<div class="ctx-line">' +
+        (rd == null ? 'Ciclo encerrado' : fmt.currency(rd) + '/dia nos ' + fmt.num(diasRest) + ' dias restantes') + ' ' +
+        (cabe ? '<span class="badge green">Cabe</span>' : '<span class="badge red">Não cabe</span>') + '</div>';
+    } else {
+      ritmoBody += '<div class="ctx-line muted">Defina o orçamento (' + c.varsOrc + ') para ver se a projeção cabe no mês.</div>';
+    }
+    cardRitmo = card('Ritmo de gasto', 'ciclo atual · Meta + Google', ritmoBody);
+  }
+
+  // --- Split da frente ---
+  let cardSplit;
+  if (c.front === 'b2b' && !ci.inicio) {
+    cardSplit = card('Formulário × outras origens', 'leads do ciclo · split pela foto da base',
+      emptyDashed('Sem dados do ciclo atual.',
+        'O split de leads do ciclo aparece quando o resumo trouxer o ciclo do mês.'));
+  } else if (c.front === 'b2b') {
+    const dailyC = ((DATA.leads || {}).daily || []).filter(r => r.dia >= ci.inicio);
+    const leadsCiclo = sum(dailyC, 'total');
+    const bs = (DATA.leads || {}).by_source || [];
+    const formTot = bs.filter(r => /formul/i.test(r.fonte || '')).reduce((a, r) => a + (r.leads || 0), 0);
+    const allTot = bs.reduce((a, r) => a + (r.leads || 0), 0);
+    const pctForm = allTot > 0 ? formTot / allTot * 100 : null;
+    cardSplit = card('Formulário × outras origens', 'leads do ciclo · split pela foto da base',
+      '<div class="big-money">' + fmt.num(leadsCiclo) + '<span class="bm-unit">leads no ciclo</span></div>' +
+      (pctForm == null
+        ? '<div class="ctx-line muted">Sem origem efetiva registrada na base ainda.</div>'
+        : pbar(pctForm) +
+        '<div class="ctx-line">Formulário <strong>' + fmt.pct(pctForm, 0) + '</strong> · outras origens <strong>' + fmt.pct(100 - pctForm, 0) + '</strong></div>' +
+        '<div class="ctx-line muted">split sobre a base com atribuição (foto atual) — o export ainda não traz a origem por dia</div>'));
+  } else {
+    const gt = ci.gasto_total || 0;
+    cardSplit = card('Meta × Google', 'distribuição do gasto no ciclo',
+      gt > 0
+        ? '<div class="big-money">' + fmt.pct((ci.gasto_meta || 0) / gt * 100, 0) + '<span class="bm-unit">Meta</span></div>' +
+        pbar((ci.gasto_meta || 0) / gt * 100) +
+        '<div class="ctx-line">Meta <strong>' + fmt.currency(ci.gasto_meta || 0) + '</strong> · Google <strong>' + fmt.currency(ci.gasto_google || 0) + '</strong></div>'
+        : emptyDashed('Sem gasto no ciclo até aqui.', 'A distribuição Meta × Google aparece assim que houver investimento no mês.'));
+  }
+  return '<div class="grid-3">' + cardSaldo + cardRitmo + cardSplit + '</div>';
+}
+
+/* ---------- 2 · O que está acontecendo (usa o filtro global) ---------- */
+function otPeriodo(c) {
+  if (c.front === 'b2b') {
+    const mb = fdays((DATA.meta_b2b || {}).daily);
+    const g = DATA.google_b2b || {};
+    const gOk = g.disponivel === true && !!g.daily;
+    const gd = gOk ? fdays(g.daily) : [];
+    const investMeta = sum(mb, 'gasto'), investGoogle = sum(gd, 'gasto');
+    return {
+      investMeta, investGoogle, invest: investMeta + investGoogle, gOk,
+      gMotivo: g.motivo || 'Google Ads ainda sem campanhas B2B.',
+      resultados: sum(fdays((DATA.leads || {}).daily), 'total'),
+      resSub: 'leads criados no CRM no período (todas as origens)',
+      resMetaPlat: sum(mb, 'leads_plat'), resMetaPlatLabel: 'leads plat.',
+      resGooglePlat: gOk ? sum(gd, 'conversoes') : null, resGooglePlatLabel: 'conversões',
+      topo: sum(mb, 'conversas'),
+      topoSub: 'conversas iniciadas pelo anúncio (Meta) · no período'
+    };
+  }
+  const me = fdays((DATA.meta_ecom || {}).daily);
+  const g = DATA.google_ecom || {};
+  const gOk = g.disponivel === true && !!g.daily;
+  const gd = gOk ? fdays(g.daily) : [];
+  const investMeta = sum(me, 'gasto'), investGoogle = sum(gd, 'gasto');
+  const compras = sum(me, 'compras'), conv = gOk ? sum(gd, 'conversoes') : 0;
+  return {
+    investMeta, investGoogle, invest: investMeta + investGoogle, gOk,
+    gMotivo: g.motivo || 'Google Ads sem dados para esta frente.',
+    resultados: compras + conv,
+    resSub: fmt.num(compras) + ' compras (pixel Meta) + ' + fmt.num(conv) + ' conversões (Google)',
+    resMetaPlat: compras, resMetaPlatLabel: 'compras',
+    resGooglePlat: gOk ? conv : null, resGooglePlatLabel: 'conversões',
+    topo: sum(me, 'cliques_link') + (gOk ? sum(gd, 'cliques') : 0),
+    topoSub: 'cliques no link (Meta)' + (gOk ? ' + cliques (Google)' : '') + ' · no período'
+  };
+}
+/* Campanhas da frente com custo por resultado × meta.
+   B2B: resultado por campanha = leads da plataforma (referência — o CRM não
+   quebra leads por campanha no diário). ECOM: compras (Meta) e conversões
+   (Google). filtered = respeita o filtro global; senão, toda a série. */
+function otCampanhas(c, filtered) {
+  const rows = [];
+  const collect = (daily, resField, plat) => {
+    const src = filtered ? fdays(daily) : (daily || []);
+    const by = aggBy(src, r => r.campanha, ['gasto', resField]);
+    Object.keys(by).forEach(k => {
+      const v = by[k];
+      if (v.gasto > 0) {
+        rows.push({
+          nome: k, plat, gasto: v.gasto, res: v[resField] || 0,
+          custo: (v[resField] || 0) > 0 ? v.gasto / v[resField] : null
+        });
+      }
+    });
+  };
+  if (c.front === 'b2b') {
+    collect((DATA.meta_b2b || {}).campaign_daily, 'leads_plat', 'Meta');
+    const g = DATA.google_b2b || {};
+    if (g.disponivel === true) collect(g.campaign_daily, 'conversoes', 'Google');
+  } else {
+    collect((DATA.meta_ecom || {}).campaign_daily, 'compras', 'Meta');
+    const g = DATA.google_ecom || {};
+    if (g.disponivel === true) collect(g.campaign_daily, 'conversoes', 'Google');
+  }
+  return {
+    rows,
+    dentro: rows.filter(r => r.custo != null && r.custo <= c.target),
+    fora: rows.filter(r => !(r.custo != null && r.custo <= c.target))
+  };
+}
+function otAgoraHtml(c, p) {
+  const custo = (p.invest > 0 && p.resultados > 0) ? p.invest / p.resultados : null;
+  let campKpi = '—', campSub = 'defina a meta de custo (' + c.varTarget + ') para habilitar';
+  if (c.target > 0) {
+    const cm = otCampanhas(c, true);
+    campKpi = fmt.num(cm.dentro.length) + ' de ' + fmt.num(cm.rows.length);
+    campSub = 'campanhas com custo/' + c.resNome + ' ≤ ' + fmt.currency(c.target) + ' no período';
+  }
+  let html = '<div class="kpis cols-5">' +
+    kpi('Investimento no período', fmt.currency(p.invest),
+      'Meta ' + fmt.currency(p.investMeta) + (p.gOk ? ' + Google ' + fmt.currency(p.investGoogle) : ' · Google sem dados')) +
+    kpi('Resultados', fmt.num(p.resultados), p.resSub) +
+    kpi('Custo por resultado', custo == null ? null : fmt.currency(custo),
+      (custo != null ? 'investimento ÷ resultados · '
+        : p.invest > 0 ? 'sem resultados no período · '
+        : p.resultados > 0 ? 'sem investimento no período · '
+        : 'sem investimento nem resultados · ') +
+      (c.target > 0 ? 'meta: até ' + fmt.currency(c.target) : 'meta não definida'), { teal: true }) +
+    kpi('Campanhas na meta', campKpi, campSub) +
+    kpi('Topo de funil', fmt.num(p.topo), p.topoSub) +
+    '</div>';
+
+  // faixas por plataforma (fundo translúcido: mostarda = Meta, terracota = Google)
+  const faixa = (cls, nome, inv, res, resLb, cpr, badge, nota) =>
+    '<div class="plat-band ' + cls + '"><div class="pb-name">' + nome + '</div>' +
+    '<div class="pb-kpis">' +
+    '<div class="pb-kpi"><span class="l">investido</span><span class="v">' + (inv == null ? '—' : fmt.currency(inv)) + '</span></div>' +
+    '<div class="pb-kpi"><span class="l">' + resLb + '</span><span class="v">' + (res == null ? '—' : fmt.num(res)) + '</span></div>' +
+    '<div class="pb-kpi"><span class="l">custo por resultado</span><span class="v">' + (cpr == null ? '—' : fmt.currency(cpr)) + '</span></div>' +
+    '<div class="pb-badge">' + badge + '</div></div>' +
+    (nota ? '<div class="pb-note">' + nota + '</div>' : '') + '</div>';
+  const cMeta = (p.investMeta > 0 && p.resMetaPlat > 0) ? p.investMeta / p.resMetaPlat : null;
+  html += faixa('meta', 'Meta Ads', p.investMeta, p.resMetaPlat, p.resMetaPlatLabel, cMeta,
+    metaBadgeCusto(cMeta, c.target),
+    c.front === 'b2b' ? 'resultados da faixa = leads reportados pela plataforma (referência)' : 'compras e receita pelo pixel da Meta');
+  if (p.gOk) {
+    const cG = (p.investGoogle > 0 && p.resGooglePlat > 0) ? p.investGoogle / p.resGooglePlat : null;
+    html += faixa('google', 'Google Ads', p.investGoogle, p.resGooglePlat, p.resGooglePlatLabel, cG,
+      metaBadgeCusto(cG, c.target), 'conversões e valor: atribuição do Google');
+  } else {
+    html += faixa('google', 'Google Ads', null, null, p.resGooglePlatLabel, null,
+      '<span class="badge gray">sem dados</span>', esc(p.gMotivo));
+  }
+  return html;
+}
+
+/* ---------- 3 · Como está evoluindo (diário, filtro global) ---------- */
+function otDailyData(c) {
+  let metaRows, gRows = null, resFieldMeta = null, resFromLeads = false;
+  if (c.front === 'b2b') {
+    metaRows = fdays((DATA.meta_b2b || {}).daily);
+    const g = DATA.google_b2b || {};
+    if (g.disponivel === true && g.daily) gRows = fdays(g.daily);
+    resFromLeads = true;                 // resultados B2B = leads do CRM (não têm plataforma)
+  } else {
+    metaRows = fdays((DATA.meta_ecom || {}).daily);
+    resFieldMeta = 'compras';
+    const g = DATA.google_ecom || {};
+    if (g.disponivel === true && g.daily) gRows = fdays(g.daily);
+  }
+  const leadRows = resFromLeads ? fdays((DATA.leads || {}).daily) : [];
+  const all = [].concat(metaRows, gRows || [], leadRows).map(r => r.dia).filter(Boolean).sort();
+  if (!all.length) return null;
+  const days = dayRange(all[0], all[all.length - 1]);
+  const invMetaIdx = dayIdx(metaRows, 'gasto');
+  const invGIdx = gRows ? dayIdx(gRows, 'gasto') : null;
+  const resMetaIdx = resFromLeads ? dayIdx(leadRows, 'total') : dayIdx(metaRows, resFieldMeta);
+  const resGIdx = (!resFromLeads && gRows) ? dayIdx(gRows, 'conversoes') : null;
+  const invMeta = days.map(d => invMetaIdx[d] || 0);
+  const invG = invGIdx ? days.map(d => invGIdx[d] || 0) : null;
+  const resMeta = days.map(d => resMetaIdx[d] || 0);
+  const resG = resGIdx ? days.map(d => resGIdx[d] || 0) : null;
+  const cpr = days.map((d, i) => {
+    const inv = invMeta[i] + (invG ? invG[i] : 0);
+    const res = resMeta[i] + (resG ? resG[i] : 0);
+    return res > 0 ? inv / res : null;
+  });
+  return { days, labels: days.map(fmt.date), invMeta, invG, resMeta, resG, cpr };
+}
+function otEvolucaoHtml(c, dd) {
+  if (!dd) {
+    return card('Como está evoluindo', 'dia a dia do período',
+      emptyDashed('Sem dados diários no período selecionado.', 'Ajuste o filtro de período no topo.'));
+  }
+  const resRelief = reliefTable(
+    [{ t: 'Dia' }, { t: c.front === 'b2b' ? 'Leads (CRM)' : 'Compras (Meta)', r: 1 }].concat(dd.resG ? [{ t: 'Conversões (Google)', r: 1 }] : []),
+    dd.days.map((d, i) => '<tr><td>' + fmt.dateFull(d) + '</td><td class="r">' + fmt.num(dd.resMeta[i]) + '</td>' +
+      (dd.resG ? '<td class="r">' + fmt.num(dd.resG[i]) + '</td>' : '') + '</tr>').join(''));
+  const invRelief = reliefTable(
+    [{ t: 'Dia' }, { t: 'Meta', r: 1 }].concat(dd.invG ? [{ t: 'Google', r: 1 }] : []),
+    dd.days.map((d, i) => '<tr><td>' + fmt.dateFull(d) + '</td><td class="r">' + fmt.currency(dd.invMeta[i]) + '</td>' +
+      (dd.invG ? '<td class="r">' + fmt.currency(dd.invG[i]) + '</td>' : '') + '</tr>').join(''));
+  const cprRelief = reliefTable([{ t: 'Dia' }, { t: 'Custo/resultado', r: 1 }],
+    dd.days.map((d, i) => '<tr><td>' + fmt.dateFull(d) + '</td><td class="r">' + (dd.cpr[i] == null ? '—' : fmt.currency(dd.cpr[i])) + '</td></tr>').join(''));
+  const resSub = c.front === 'b2b'
+    ? 'leads criados no CRM por dia (todas as origens)'
+    : 'compras (pixel Meta)' + (dd.resG ? ' + conversões (Google) — barras empilhadas' : '');
+  const invSub = dd.invG ? 'Meta + Google empilhados por dia' : 'gasto Meta por dia' + (c.front === 'b2b' ? ' · Google sem campanhas B2B' : '');
+  const cprSub = 'investimento ÷ resultados do dia' +
+    (c.target > 0 ? ' · linha tracejada = meta (' + fmt.currency(c.target) + ')' : ' · meta de custo não definida');
+  return '<div class="grid-3">' +
+    chartCard('Resultados por dia', resSub, 'ch-ot-res', '', resRelief) +
+    chartCard('Investimento por dia', invSub, 'ch-ot-inv', '', invRelief) +
+    chartCard('Custo por resultado por dia', cprSub, 'ch-ot-cpr', '', cprRelief) +
+    '</div>';
+}
+function otCharts(c, dd) {
+  if (!dd) return;
+  const stackEx = { stack: 'p', borderColor: P.bgCard, borderWidth: 2, borderRadius: 3 };
+  // Paleta por entidade: leads = mostarda (B2B); compras/conversões = oliva
+  // (ECOM), com o segmento Google no tom derivado da oliva (GOOGLE_RES).
+  const dsRes = [barDs(c.front === 'b2b' ? 'Leads (CRM)' : 'Compras (Meta)', dd.resMeta,
+    c.front === 'b2b' ? S.mostarda : S.oliva, dd.resG ? stackEx : {})];
+  if (dd.resG) dsRes.push(barDs('Conversões (Google)', dd.resG, GOOGLE_RES, stackEx));
+  makeChart('ch-ot-res', {
+    type: 'bar', data: { labels: dd.labels, datasets: dsRes },
+    options: baseOpts({
+      plugins: dd.resG ? { legend: legendTop() } : {},
+      scales: { x: deepMerge(xDaily(), { stacked: true }), y: yCount({ stacked: true }) }
+    })
+  });
+  const dsInv = [barDs('Meta (R$)', dd.invMeta, S.terracota, dd.invG ? stackEx : {})];
+  if (dd.invG) dsInv.push(barDs('Google (R$)', dd.invG, GOOGLE_INV, stackEx));
+  makeChart('ch-ot-inv', {
+    type: 'bar', data: { labels: dd.labels, datasets: dsInv },
+    options: baseOpts({
+      plugins: deepMerge({ tooltip: { callbacks: moneyTooltip() } }, dd.invG ? { legend: legendTop() } : {}),
+      scales: { x: deepMerge(xDaily(), { stacked: true }), y: yMoney({ stacked: true }) }
+    })
+  });
+  const dsCpr = [lineDs('Custo por resultado', dd.cpr, S.mostarda, { spanGaps: false, pointRadius: 3 })];
+  if (c.target > 0) {
+    dsCpr.push({
+      label: 'Meta (' + fmt.currency(c.target) + ')', data: dd.days.map(() => c.target),
+      borderColor: ST.green, borderDash: [6, 4], borderWidth: 2,
+      pointRadius: 0, pointHoverRadius: 0, fill: false
+    });
+  }
+  makeChart('ch-ot-cpr', {
+    type: 'line', data: { labels: dd.labels, datasets: dsCpr },
+    options: baseOpts({
+      plugins: deepMerge({
+        tooltip: { callbacks: { label: ctx => ctx.parsed.y == null ? 'sem resultado no dia' : ctx.dataset.label + ': ' + fmt.currency(ctx.parsed.y) } }
+      }, c.target > 0 ? { legend: legendTop() } : {}),
+      scales: { y: yMoney() }
+    })
+  });
+}
+
+/* ---------- 4 · Histórico mensal (independe do filtro) ---------- */
+function otHistHtml(c) {
+  const hist = (c.ot.monthly_hist || []).slice().sort((a, b) => (a.mes > b.mes ? 1 : a.mes < b.mes ? -1 : 0));
+  if (!hist.length) {
+    return card('Histórico mensal', 'mês a mês — independe do filtro de período', emptyDashed('Sem histórico mensal ainda.'));
+  }
+  const mesCell = h => '<td class="name">' + mesLabel(h.mes) +
+    (h.parcial ? ' <span class="badge amber">parcial</span>' : '') + '</td>';
+  let head, body, nota;
+  if (c.front === 'b2b') {
+    const leadsMes = {};
+    ((DATA.leads || {}).monthly || []).forEach(r => { leadsMes[r.mes] = r.total || 0; });
+    head = '<tr class="tg"><th></th>' +
+      '<th colspan="5" class="gh gm">Meta Ads</th><th class="gh gg">Google Ads</th><th class="gh gt">Total</th></tr>' +
+      '<tr><th>Mês</th><th class="r">Investimento</th><th class="r">Cliques no link</th><th class="r">Leads plat.</th>' +
+      '<th class="r">Leads CRM*</th><th class="r">Custo/lead*</th><th class="r">Investimento</th><th class="r">Investimento</th></tr>';
+    body = hist.map(h => {
+      const m = h.meta || {};
+      const lc = leadsMes[h.mes] || 0;
+      const custo = (lc > 0 && (m.gasto || 0) > 0) ? m.gasto / lc : null;
+      const gG = (h.google && h.google.gasto != null) ? h.google.gasto : null;
+      return '<tr>' + mesCell(h) +
+        '<td class="r">' + fmt.currency(m.gasto || 0) + '</td>' +
+        '<td class="r">' + fmt.num(m.cliques_link || 0) + '</td>' +
+        '<td class="r">' + fmt.num(m.leads_plat || 0) + '</td>' +
+        '<td class="r">' + fmt.num(lc) + '</td>' +
+        '<td class="r">' + (custo == null ? '—' : fmt.currency(custo)) + '</td>' +
+        '<td class="r">' + (gG == null ? '—' : fmt.currency(gG)) + '</td>' +
+        '<td class="r">' + fmt.currency((m.gasto || 0) + (gG || 0)) + '</td></tr>';
+    }).join('');
+    nota = '* <strong>Leads CRM</strong> = todos os leads criados no CRM no mês (todas as origens — a cobertura de atribuição ainda é parcial); ' +
+      '<strong>Custo/lead</strong> = investimento Meta ÷ leads CRM do mês — aproximação enquanto o rastreamento não cobre 100% (detalhe na página Qualidade dos dados). ' +
+      'Google Ads: "—" até existirem campanhas B2B. <strong>Parcial</strong> = mês corrente em andamento.';
+  } else {
+    head = '<tr class="tg"><th></th>' +
+      '<th colspan="5" class="gh gm">Meta Ads</th><th colspan="4" class="gh gg">Google Ads</th><th colspan="2" class="gh gt">Total</th></tr>' +
+      '<tr><th>Mês</th><th class="r">Investimento</th><th class="r">Compras</th><th class="r">Receita</th><th class="r">ROAS</th><th class="r">CPA</th>' +
+      '<th class="r">Investimento</th><th class="r">Conversões</th><th class="r">Valor</th><th class="r">ROAS</th>' +
+      '<th class="r">Investimento</th><th class="r">Receita total</th></tr>';
+    body = hist.map(h => {
+      const m = h.meta || {}, g = h.google || {};
+      const gOn = g.gasto != null;
+      const roasM = (m.gasto || 0) > 0 ? (m.valor_compras || 0) / m.gasto : null;
+      const cpaM = (m.compras || 0) > 0 ? (m.gasto || 0) / m.compras : null;
+      const roasG = gOn && (g.gasto || 0) > 0 ? (g.valor_conversoes || 0) / g.gasto : null;
+      return '<tr>' + mesCell(h) +
+        '<td class="r">' + fmt.currency(m.gasto || 0) + '</td>' +
+        '<td class="r">' + fmt.num(m.compras || 0) + '</td>' +
+        '<td class="r">' + fmt.currency(m.valor_compras || 0) + '</td>' +
+        '<td class="r">' + fmt.roas(roasM) + '</td>' +
+        '<td class="r">' + (cpaM == null ? '—' : fmt.currency(cpaM)) + '</td>' +
+        '<td class="r">' + (gOn ? fmt.currency(g.gasto || 0) : '—') + '</td>' +
+        '<td class="r">' + (gOn ? fmt.num(g.conversoes || 0) : '—') + '</td>' +
+        '<td class="r">' + (gOn ? fmt.currency(g.valor_conversoes || 0) : '—') + '</td>' +
+        '<td class="r">' + fmt.roas(roasG) + '</td>' +
+        '<td class="r">' + fmt.currency((m.gasto || 0) + (g.gasto || 0)) + '</td>' +
+        '<td class="r">' + fmt.currency((m.valor_compras || 0) + (g.valor_conversoes || 0)) + '</td></tr>';
+    }).join('');
+    nota = 'Compras e receita da Meta: <strong>pixel</strong>; conversões e valor do Google: <strong>atribuição da plataforma</strong> — referência, não venda confirmada. ' +
+      '<strong>Receita total</strong> soma as duas atribuições (podem se sobrepor). <strong>Parcial</strong> = mês corrente em andamento.';
+  }
+  return card('Histórico mensal', 'mês a mês — independe do filtro de período',
+    '<div class="table-wrap"><table class="tbl-hist"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="note">' + nota + '</div>');
+}
+
+/* ---------- 5 · Onde está o resultado ---------- */
+function otResultadoHtml(c) {
+  const ce = c.ot.criativos_eficientes || [];
+  const zr = c.ot.zero_retorno || { total_gasto: 0, itens: [] };
+  const thumb32 = t => t
+    ? '<img class="thumb xs" src="' + esc(t) + '" alt="" loading="lazy" referrerpolicy="no-referrer" ' +
+    'onerror="this.style.display=&#39;none&#39;;this.nextElementSibling.style.display=&#39;flex&#39;"><div class="thumb-fb xs">▦</div>'
+    : '<div class="thumb-fb xs" style="display:flex">▦</div>';
+  const item = (i, valHtml) => {
+    const plink = safeHttpUrl(i.permalink);
+    const nome = plink
+      ? '<a href="' + esc(plink) + '" target="_blank" rel="noopener">' + esc(i.anuncio) + '</a>'
+      : esc(i.anuncio || '(sem nome)');
+    return '<div class="ri">' + thumb32(i.thumbnail) +
+      '<div class="ri-tx"><div class="ri-nm">' + nome + '</div>' +
+      (i.campanha ? '<div class="ri-cp">' + esc(i.campanha) + '</div>' : '') +
+      '<div class="ri-vl">' + valHtml + '</div></div></div>';
+  };
+  // Sem gasto, o custo por resultado é indefinido (não zero) — item fora do ranking.
+  const ceComGasto = ce.filter(i => (i.gasto || 0) > 0);
+  const col1 = card('🏆 Criativos mais eficientes', 'menor custo por resultado · toda a série',
+    ceComGasto.length
+      ? ceComGasto.slice(0, 6).map(i => {
+        const res = i.resultado || i.resultado_fallback || 0;
+        return item(i, '<span class="ok">' + fmt.currency(i.custo_por_resultado) + '/resultado · ' +
+          fmt.num(res) + (res === 1 ? ' resultado' : ' resultados') + '</span>');
+      }).join('')
+      : emptyDashed('Nenhum criativo com gasto e resultado ainda.'));
+  const col2 = card('🔥 Dinheiro sem retorno' + (zr.total_gasto > 0 ? ' — ' + fmt.currency(zr.total_gasto) : ''),
+    'anúncios com gasto e zero resultado · toda a série',
+    (zr.itens || []).length
+      ? zr.itens.slice(0, 6).map(i => item(i, '<span class="bad">' + fmt.currency(i.gasto) + ' · zero resultado</span>')).join('')
+      : emptyDashed('Nenhum anúncio com gasto e zero resultado.', 'Bom sinal — todo o gasto está gerando pelo menos um resultado.'));
+  let col3;
+  if (c.target > 0) {
+    const cm = otCampanhas(c, false);
+    col3 = card('⚠️ Campanhas fora da meta', 'custo/' + c.resNome + ' acima de ' + fmt.currency(c.target) + ' · toda a série',
+      cm.fora.length
+        ? cm.fora.slice().sort((a, b) => b.gasto - a.gasto).map(r =>
+          '<div class="ri"><div class="ri-tx"><div class="ri-nm">' + esc(r.nome) + ' <span class="muted">(' + r.plat + ')</span></div>' +
+          '<div class="ri-vl"><span class="bad">' + (r.custo == null ? 'sem resultados' : fmt.currency(r.custo) + '/' + c.resNome) + '</span>' +
+          ' · ' + fmt.currency(r.gasto) + ' em jogo</div></div></div>').join('')
+        : '<div class="ri"><div class="ri-tx"><div class="ri-vl"><span class="ok">Todas as campanhas com gasto estão dentro da meta.</span></div></div></div>');
+  } else {
+    col3 = card('⚠️ Campanhas fora da meta', 'requer meta de custo',
+      emptyDashed('Defina a meta de custo para habilitar.',
+        'Configure ' + c.varTarget + ' nas Variables do repositório — o painel passa a apontar as campanhas com custo por ' +
+        c.resNome + ' acima da meta e o gasto em jogo.'));
+  }
+  return '<div class="grid-3">' + col1 + col2 + col3 + '</div>';
+}
+
+/* ---------- 6 · Qual ação tomar ---------- */
+function otAcoesHtml(c) {
+  const ci = c.ot.ciclo || {};
+  const orcTotal = c.orcMeta + c.orcGoogle;
+  const zr = c.ot.zero_retorno || { total_gasto: 0, itens: [] };
+  const cards = [];
+  const aCard = (kind, tag, titulo, corpo) =>
+    '<div class="action-card ' + kind + '"><span class="badge ' + (kind === 'crit' ? 'red' : kind === 'ok' ? 'green' : 'gray') + '">' + tag + '</span>' +
+    '<div class="ac-tx"><div class="ac-t">' + titulo + '</div><div class="ac-b">' + corpo + '</div></div></div>';
+  if (zr.total_gasto > 0) {
+    cards.push(aCard('crit', 'Crítico', fmt.currency(zr.total_gasto) + ' gastos sem nenhum resultado',
+      fmt.num((zr.itens || []).length) + ' anúncio(s) com gasto e zero resultado em toda a série — pausar ou trocar o criativo. Lista na seção acima.'));
+  }
+  if (c.target > 0) {
+    const cm = otCampanhas(c, false);
+    cm.fora.slice().sort((a, b) => b.gasto - a.gasto).forEach(r => {
+      cards.push(aCard('crit', 'Crítico', esc(r.nome) + ' (' + r.plat + ') fora da meta de custo',
+        (r.custo == null ? 'Gasto sem nenhum resultado' : 'Custo por ' + c.resNome + ' de ' + fmt.currency(r.custo)) +
+        ' — meta: até ' + fmt.currency(c.target) + ' · ' + fmt.currency(r.gasto) + ' em jogo.'));
+    });
+    if (cm.dentro.length) {
+      cards.push(aCard('ok', 'Na meta', fmt.num(cm.dentro.length) + ' campanha(s) dentro da meta de custo',
+        cm.dentro.map(r => esc(r.nome) + ' (' + fmt.currency(r.custo) + '/' + c.resNome + ')').join(' · ')));
+    }
+  }
+  if (orcTotal > 0) {
+    const proj = ci.projecao_mes || 0;
+    if (proj > orcTotal) {
+      const diasRest = Math.max(0, (ci.dias_no_mes || 0) - (ci.dias_passados || 0));
+      const rd = diasRest > 0 ? Math.max(0, orcTotal - (ci.gasto_total || 0)) / diasRest : null;
+      cards.push(aCard('crit', 'Crítico', 'Projeção do mês estoura o orçamento',
+        'Projeção de ' + fmt.currency(proj) + ' contra ' + fmt.currency(orcTotal) + ' de orçamento' +
+        (rd == null ? '.' : ' — reduzir o ritmo para até ' + fmt.currency(rd) + '/dia nos ' + fmt.num(diasRest) + ' dias restantes.')));
+    } else {
+      cards.push(aCard('ok', 'Na meta', 'Projeção do mês cabe no orçamento',
+        'Projeção de ' + fmt.currency(proj) + ' contra ' + fmt.currency(orcTotal) + ' de orçamento do mês.'));
+    }
+  }
+  if (!(c.target > 0) && !(orcTotal > 0)) {
+    cards.push(aCard('info', 'Configurar', 'Defina metas e orçamentos para habilitar os alertas',
+      'Configure nas Variables do repositório: <strong>' + c.varsOrc + '</strong> (orçamento mensal por plataforma) e <strong>' +
+      c.varTarget + '</strong> (meta de custo por ' + c.resNome + '). Com isso o painel prioriza os alertas por dinheiro em jogo — ' +
+      'campanhas fora da meta e projeção × orçamento.'));
+  }
+  if (!cards.length) {
+    cards.push(aCard('ok', 'Na meta', 'Nenhum alerta no momento', 'Nada crítico detectado com as metas e orçamentos atuais.'));
+  }
+  return '<div class="actions">' + cards.join('') + '</div>';
+}
+
+/* ---------- Página inteira ---------- */
+function renderOtimizacao(el, front) {
+  const c = otCfg(front);
+  const p = otPeriodo(c);
+  const dd = otDailyData(c);
+  let html = otHeaderHtml(front);
+  html += secTitle('Controle de investimento', 'ciclo mensal e distribuição do gasto');
+  html += otCicloHtml(c);
+  html += secTitle('O que está acontecendo', 'volume e eficiência no período selecionado');
+  html += otAgoraHtml(c, p);
+  html += secTitle('Como está evoluindo', 'dia a dia do período selecionado');
+  html += otEvolucaoHtml(c, dd);
+  html += secTitle('Histórico mensal', 'mês a mês — independe do filtro');
+  html += otHistHtml(c);
+  html += secTitle('Onde está o resultado', 'e onde o dinheiro está parado');
+  html += otResultadoHtml(c);
+  html += secTitle('Qual ação tomar', 'alertas priorizados por dinheiro em jogo');
+  html += otAcoesHtml(c);
+  html += front === 'b2b' ? otLegadoB2B() : otLegadoEcom();
+  el.innerHTML = html;
+  otCharts(c, dd);
+}
+
+/* ============================================================
+   B2B · VISÃO GERAL — dashboard de otimização + detalhe da frente
+   (funil, origens e qualidade de atendimento preservados abaixo)
+   ============================================================ */
+function renderVisaoB2B(el) { renderOtimizacao(el, 'b2b'); }
+
+function otLegadoB2B() {
   const L = fdays((DATA.leads || {}).daily);
-  const leadsCRM = sum(L, 'total');
   const leadsPagos = sum(L, 'pagos');
   const mbDaily = fdays((DATA.meta_b2b || {}).daily);
   const invest = sum(mbDaily, 'gasto');
@@ -662,15 +1253,11 @@ function renderVisaoB2B(el) {
   const cpl = (invest > 0 && leadsPagos > 0) ? invest / leadsPagos : null;
   const cobEf = (DATA.utm || {}).cobertura_efetiva || {};
 
-  let html = qualityBanners(true);
-
-  // KPI-herói: CPL (CRM). Demais KPIs menores.
-  html += '<div class="kpis cols-hero-6">' +
+  let html = secTitle('Detalhe da frente', 'funil, origens e atendimento');
+  html += '<div class="kpis cols-4">' +
     kpi('CPL (CRM)', cpl == null ? null : fmt.currency(cpl),
-      cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true, hero: true }) +
-    kpi('Leads no CRM', fmt.num(leadsCRM), 'criados no período · pipeline B2B') +
-    kpi('Investimento', fmt.currency(invest), 'Meta (frente B2B) · Google: sem campanhas B2B ainda') +
-    kpi('Leads plataforma', fmt.num(leadsPlat), 'reportado pela plataforma (referência)') +
+      cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true }) +
+    kpi('Leads plataforma', fmt.num(leadsPlat), 'reportado pela plataforma (referência) · no período') +
     kpi('Vendas', fmt.num(vendas), 'no período') +
     kpi('Perdidos', fmt.num(perdidos), 'no período') +
     '</div>';
@@ -679,27 +1266,6 @@ function renderVisaoB2B(el) {
     'atribuídos ao tráfego pago por <strong>origem efetiva</strong> (UTM ou planilha do formulário). ' +
     'Cobertura efetiva: <strong>' + fmt.pct(cobEf.pct, 0) + '</strong> dos leads têm atribuição — o CPL descreve essa fatia rastreada, não o total. ' +
     'E-commerce e impulsionamento ficam no painel E-commerce.</div>';
-
-  const sL = dailySeries((DATA.leads || {}).daily, ['total']);
-  const sI = dailySeries((DATA.meta_b2b || {}).daily, ['gasto']);
-
-  // primeiro dia com dado da frente B2B (nada hardcoded: vem da própria série)
-  const mbAll = (DATA.meta_b2b || {}).daily || [];
-  const mbMin = mbAll.reduce((a, r) => (r.dia && (!a || r.dia < a)) ? r.dia : a, null);
-  const semInvestMsg = mbMin
-    ? 'A campanha de captação B2B começou em ' + fmt.dateFull(mbMin) + ' — amplie o período.'
-    : 'Ainda não há investimento B2B registrado na série.';
-
-  html += '<div class="grid-2">' +
-    (sL
-      ? chartCard('Leads por dia', 'entradas no pipeline (CRM)', 'ch-vg-leads', '',
-        dailyRelief(sL, [{ k: 'total', t: 'Leads', f: fmt.num }]))
-      : card('Leads por dia', 'entradas no pipeline (CRM)', emptyDashed('Sem leads no período selecionado.', 'Ajuste o filtro de período no topo.'))) +
-    (sI
-      ? chartCard('Investimento por dia', 'gasto Meta da frente B2B (campanhas de leads)', 'ch-vg-invest', '',
-        dailyRelief(sI, [{ k: 'gasto', t: 'Gasto', f: fmt.currency }]))
-      : card('Investimento por dia', 'gasto Meta da frente B2B (campanhas de leads)', emptyDashed('Sem investimento B2B no período.', semInvestMsg))) +
-    '</div>';
 
   const fp = funnelPeriodStages();
   html += card('Funil B2B — visão do período',
@@ -739,26 +1305,7 @@ function renderVisaoB2B(el) {
       ], qualRows)
       : emptyDashed('Sem dados por responsável.'));
 
-  el.innerHTML = html;
-
-  if (sL) {
-    makeChart('ch-vg-leads', {
-      type: 'bar',
-      data: { labels: sL.labels, datasets: [barDs('Leads', sL.data.total, S.mostarda)] },
-      options: baseOpts({})
-    });
-  }
-  if (sI) {
-    // Terracota em série densa → linha 2px + relief "Ver tabela" (acima)
-    makeChart('ch-vg-invest', {
-      type: 'line',
-      data: { labels: sI.labels, datasets: [lineDs('Gasto (R$)', sI.data.gasto, S.terracota, { fill: true })] },
-      options: baseOpts({
-        plugins: { tooltip: { callbacks: moneyTooltip() } },
-        scales: { y: yMoney() }
-      })
-    });
-  }
+  return html;
 }
 
 /* ============================================================
@@ -786,9 +1333,7 @@ function renderFunilCRM(el) {
   const tPerda = diffs.length ? diffs.reduce((a, b) => a + b, 0) / diffs.length : null;
   const ciclo = crm.ciclo || {};
 
-  let html = qualityBanners(false);
-
-  html += '<div class="kpis cols-5">' +
+  let html = '<div class="kpis cols-5">' +
     kpi('Leads no período', fmt.num(deals.length), 'pipeline de venda B2B') +
     kpi('Em andamento', fmt.num(andamento), 'leads vivos no funil') +
     kpi('Vendas', fmt.num(vendas), 'no período') +
@@ -977,8 +1522,7 @@ function renderAtendimento(el) {
     }
   });
 
-  let html = qualityBanners(false);
-  html += banner('blue', 'Os tempos de resposta medem a espera por uma <strong>pessoa</strong> — o robô (resposta em &lt; 0,5 min) é contado à parte e excluído das medianas.');
+  let html = banner('blue', 'Os tempos de resposta medem a espera por uma <strong>pessoa</strong> — o robô (resposta em &lt; 0,5 min) é contado à parte e excluído das medianas.');
 
   html += '<div class="kpis cols-6">' +
     kpi('Conversas', fmt.num(at.conversas_total), 'foto 180 dias — não usa o filtro') +
@@ -1076,8 +1620,7 @@ function renderMetaB2B(el) {
   const custoLeadPlat = leadsPlat > 0 ? gasto / leadsPlat : null;
   const target = (DATA.config && DATA.config.cpl_target_meta) || 0;
 
-  let html = qualityBanners(false);
-  html += banner('blue', 'Esta página cobre <strong>somente as campanhas de leads B2B</strong> (frente meta_b2b). ' +
+  let html = banner('blue', 'Esta página cobre <strong>somente as campanhas de leads B2B</strong> (frente meta_b2b). ' +
     'As campanhas de e-commerce estão no painel E-commerce, e o impulsionamento na página Institucional &amp; Impulsionamento (painel E-commerce). ' +
     'Cliques, CTR e CPC usam <strong>cliques no link</strong> (link clicks) — não o total de cliques do anúncio.');
 
@@ -1275,8 +1818,7 @@ function googleStatusBadge(st) {
 }
 function renderGoogleAds(el, frente) {
   const g = (frente === 'b2b' ? DATA.google_b2b : DATA.google_ecom) || {};
-  // Banners de qualidade descrevem CRM/UTM — só fazem sentido no painel B2B.
-  let html = frente === 'b2b' ? qualityBanners(false) : '';
+  let html = '';
 
   // ----- Indisponível → estado vazio tracejado com o motivo do JSON -----
   if (g.disponivel !== true || !g.daily) {
@@ -1417,8 +1959,7 @@ function renderEvolucaoB2B(el) {
   const mesesVP = Array.from(new Set(Object.keys(wonM).concat(Object.keys(lostM)))).sort();
   const cplM = metaM.map(r => (r.leads_plat > 0 && r.gasto) ? r.gasto / r.leads_plat : null);
 
-  let html = qualityBanners(false);
-  html += '<div class="note-blue">Visão mensal completa da frente B2B — <strong>não usa o filtro de período do topo</strong>. ' +
+  let html = '<div class="note-blue">Visão mensal completa da frente B2B — <strong>não usa o filtro de período do topo</strong>. ' +
     'Vendas contadas pelo mês de fechamento (agregado do CRM); perdas pelo mês de criação do lead — ' +
     'eixos diferentes até o ETL exportar a data de ganho por lead.</div>';
 
@@ -1523,8 +2064,7 @@ function renderUTM(el) {
       rows.map(r => '<tr><td class="name">' + esc(r.valor) + '</td><td class="r">' + fmt.num(r.leads) + '</td></tr>').join(''))
     : emptyDashed('Sem valores registrados.');
 
-  let html = qualityBanners(false);
-  html += banner('blue', 'Cobertura de parametrização dos leads do CRM. Esta página retrata a <strong>foto atual da base</strong> e <strong>não usa o filtro de período</strong>.');
+  let html = banner('blue', 'Cobertura de parametrização dos leads do CRM. Esta página retrata a <strong>foto atual da base</strong> e <strong>não usa o filtro de período</strong>.');
 
   html += card('Cobertura de UTM', 'quantos leads chegam identificados ao CRM',
     '<div class="coverage">' +
@@ -1569,9 +2109,63 @@ function renderUTM(el) {
 }
 
 /* ============================================================
-   E-COMMERCE · VISÃO GERAL
+   QUALIDADE DOS DADOS (compartilhada) — central dos avisos âmbar
+   (relatorio.alertas) + cobertura de rastreamento como tiles.
    ============================================================ */
-function renderVisaoEcom(el) {
+function renderQualidade(el, front) {
+  const alertas = (DATA.relatorio && DATA.relatorio.alertas) || [];
+  const utm = DATA.utm || {};
+  const cob = utm.cobertura || null;
+  const cobEf = utm.cobertura_efetiva || null;
+
+  let html = banner('blue', 'Central de qualidade dos dados: tudo que <strong>limita a leitura</strong> dos números dos painéis mora aqui — ' +
+    'com o que fazer para destravar cada ponto. Foto atual da base — <strong>não usa o filtro de período</strong>.' +
+    (front === 'ecom'
+      ? ' Os avisos descrevem a base compartilhada (CRM, atendimento e rastreamento, coletados na frente B2B) — mas impactam a confiança dos números nos dois painéis.'
+      : ''));
+
+  // ----- Tiles de cobertura de rastreamento -----
+  const utmLink = front === 'b2b'
+    ? 'detalhe na página <a href="#b2b/utm">Rastreamento (UTM)</a>'
+    : 'detalhe no painel B2B → <a href="#b2b/utm">Rastreamento (UTM)</a>';
+  if (cob || cobEf) {
+    html += '<div class="kpis cols-3">' +
+      (cob ? kpi('Cobertura de UTM', fmt.pct(cob.pct, 1),
+        fmt.num(cob.com_utm) + ' de ' + fmt.num(cob.total) + ' leads chegam com UTM · foto atual da base', { teal: true }) : '') +
+      (cobEf ? kpi('Cobertura efetiva', fmt.pct(cobEf.pct, 1),
+        fmt.num(cobEf.com_atribuicao) + ' de ' + fmt.num(cobEf.total) + ' leads com atribuição (' +
+        esc(cobEf.nota || 'UTM ou planilha do formulário') + ')', { teal: true }) : '') +
+      kpi('Observações abertas', fmt.num(alertas.length), 'avisos de qualidade vindos do ETL — lista abaixo') +
+      '</div>';
+  }
+
+  // ----- Um card por aviso -----
+  if (alertas.length) {
+    html += alertas.map(a => {
+      const m = alertMeta(a.tipo);
+      return '<div class="card q-card">' +
+        '<div class="q-head"><span class="q-ic">⚠</span><h3>' + esc(m.titulo) + '</h3></div>' +
+        '<p class="q-text">' + esc(a.texto) + '</p>' +
+        '<div class="q-do"><strong>O que fazer:</strong> ' + esc(m.fazer) + '</div>' +
+        '</div>';
+    }).join('');
+  } else {
+    html += card('Avisos de qualidade', 'vindos do ETL a cada atualização',
+      emptyDashed('Nenhuma observação de qualidade aberta.', 'Quando o ETL detectar algo que limite a leitura dos números, o aviso aparece aqui.'));
+  }
+
+  html += '<div class="note">Cobertura de rastreamento: ' + utmLink + '. Os avisos são gerados automaticamente pelo ETL a cada atualização — somem daqui quando o problema é resolvido na origem.</div>';
+
+  el.innerHTML = html;
+}
+
+/* ============================================================
+   E-COMMERCE · VISÃO GERAL — dashboard de otimização + detalhe
+   da frente (receita/ROAS do pixel preservados abaixo)
+   ============================================================ */
+function renderVisaoEcom(el) { renderOtimizacao(el, 'ecom'); }
+
+function otLegadoEcom() {
   const me = DATA.meta_ecom || {};
   const dP = fdays(me.daily);
   const gasto = sum(dP, 'gasto');
@@ -1595,11 +2189,11 @@ function renderVisaoEcom(el) {
   const gRoas = gGasto > 0 ? gValor / gGasto : null;
   const investTotal = gasto + gGasto;
 
-  let html = banner('blue', 'Compras e receita vêm do <strong>pixel da Meta</strong> (atribuição da plataforma) — ' +
+  let html = secTitle('Detalhe da frente', 'receita e ROAS por plataforma');
+  html += banner('blue', 'Compras e receita vêm do <strong>pixel da Meta</strong> (atribuição da plataforma) — ' +
     'a loja ainda não envia venda confirmada para cá. Sem CRM nesta frente: a loja não usa o Kommo. ' +
-    'O <strong>Google Ads</strong> fica no bloco próprio abaixo — só o <strong>Investimento total</strong> soma as duas plataformas.');
+    'Conversões e valor do <strong>Google</strong> são atribuição do Google e <strong>não somam</strong> com o pixel — só o investimento total soma as duas plataformas.');
 
-  // KPI-herói: ROAS (só Meta — receita e gasto da mesma plataforma)
   html += '<div class="kpis cols-hero-6">' +
     kpi('ROAS', roas == null ? null : fmt.dec(roas, 2) + '×',
       roas == null ? 'sem gasto no período' : 'receita ÷ gasto · pixel da Meta (só Meta)', { teal: true, hero: true }) +
@@ -1610,7 +2204,6 @@ function renderVisaoEcom(el) {
     kpi('Cliques no link', fmt.num(cli), ctr == null ? 'no período' : 'CTR ' + fmt.pct(ctr, 1)) +
     '</div>';
 
-  // ----- Investimento total + KPIs Google (atribuição do Google) -----
   html += card('Google Ads (Shopping) · atribuição do Google',
     gOk
       ? 'contexto da frente · o <strong>Investimento total</strong> soma Meta + Google no período; conversões e valor são reportados pelo Google e <strong>não somam</strong> com as compras/receita do pixel acima · detalhe na página Google Ads'
@@ -1624,40 +2217,7 @@ function renderVisaoEcom(el) {
       'valor conv. ÷ gasto · atribuição do Google') +
     '</div>');
 
-  const sG = dailySeries(me.daily, ['gasto']);
-  const sC = dailySeries(me.daily, ['compras', 'valor_compras']);
-
-  html += '<div class="grid-2">' +
-    (sG
-      ? chartCard('Gasto por dia', 'campanhas de e-commerce (Meta)', 'ch-ec-gasto', '',
-        dailyRelief(sG, [{ k: 'gasto', t: 'Gasto', f: fmt.currency }]))
-      : card('Gasto por dia', 'campanhas de e-commerce (Meta)', emptyDashed('Sem gasto no período selecionado.', 'Ajuste o filtro de período no topo.'))) +
-    (sC
-      ? chartCard('Compras por dia', 'pixel da Meta', 'ch-ec-compras', '',
-        dailyRelief(sC, [{ k: 'compras', t: 'Compras', f: fmt.num }, { k: 'valor_compras', t: 'Receita', f: fmt.currency }]))
-      : card('Compras por dia', 'pixel da Meta', emptyDashed('Sem compras no período selecionado.'))) +
-    '</div>';
-
-  el.innerHTML = html;
-
-  if (sG) {
-    // Terracota em série densa → linha 2px + relief "Ver tabela"
-    makeChart('ch-ec-gasto', {
-      type: 'line',
-      data: { labels: sG.labels, datasets: [lineDs('Gasto (R$)', sG.data.gasto, S.terracota, { fill: true })] },
-      options: baseOpts({
-        plugins: { tooltip: { callbacks: moneyTooltip() } },
-        scales: { y: yMoney() }
-      })
-    });
-  }
-  if (sC) {
-    makeChart('ch-ec-compras', {
-      type: 'bar',
-      data: { labels: sC.labels, datasets: [barDs('Compras', sC.data.compras, S.oliva)] },
-      options: baseOpts({})
-    });
-  }
+  return html;
 }
 
 /* ============================================================
@@ -2032,7 +2592,6 @@ function renderPublico(el, front) {
 
   let html = '';
   if (isB2B) {
-    html += qualityBanners(false);
     html += banner('blue', 'Dados da Meta com granularidade <strong>mensal</strong> — o filtro considera os <strong>meses selecionados inteiros</strong>. ' +
       'Somente as campanhas da frente <strong>B2B</strong> (campo frente = b2b).');
   } else {

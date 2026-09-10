@@ -536,3 +536,111 @@ body.mode-select #selector {
 .login-box button:hover:not(:disabled) { filter: brightness(1.06); }
 .login-box button:disabled { opacity: .45; cursor: not-allowed; }
 .login-err { color: var(--red); font-size: 12.5px; min-height: 18px; margin-top: 12px; }
+
+/* ============================================================
+   Visão Geral · Dashboard de Otimização + Qualidade dos dados
+   ============================================================ */
+/* cabeçalho de contexto da página */
+.page-context { color: var(--text-muted); font-size: 12.5px; margin-bottom: 10px; line-height: 1.5; }
+.page-context strong { color: var(--text-soft); }
+/* chip discreto de qualidade (Visão Geral) */
+.q-chip-row { margin-bottom: 16px; }
+.q-chip {
+  display: inline-block;
+  font-size: 12px; font-weight: 600;
+  color: var(--amber);
+  background: #18120D;
+  border: 1px solid #65430C;
+  border-radius: 999px;
+  padding: 4px 13px;
+  text-decoration: none;
+}
+.q-chip:hover { color: #FBBF24; border-color: #8A5C12; text-decoration: none; }
+/* títulos de seção */
+.sec-title { font-size: 16.5px; font-weight: 800; letter-spacing: -.01em; margin: 34px 0 14px; }
+.sec-title span { color: var(--text-muted); font-weight: 600; font-size: 12.5px; margin-left: 4px; }
+/* grid de 3 colunas */
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 28px; }
+.grid-3 > .card { margin-bottom: 0; }
+/* números grandes dos cards de ciclo */
+.big-money { font-size: 29px; font-weight: 800; letter-spacing: -.01em; }
+.big-money .bm-unit { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-left: 7px; }
+.ctx-line { font-size: 12.5px; color: var(--text-soft); margin-top: 9px; line-height: 1.55; }
+.ctx-line.muted, .ctx-line .muted { color: var(--text-muted); }
+/* barras de progresso */
+.pbar { height: 8px; background: var(--track); border-radius: 999px; overflow: hidden; margin: 10px 0 0; }
+.pbar span { display: block; height: 100%; background: var(--grad-active); border-radius: 999px; }
+.pbar.danger span { background: var(--red); }
+/* sub-barras por plataforma (saldo em conta) */
+.sb-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; }
+.sb-row .sb-lb { width: 82px; flex: none; color: var(--text-soft); font-weight: 600; }
+.sb-row .pbar { flex: 1; margin: 0; }
+.sb-row .sb-vl { flex: none; color: var(--text-muted); white-space: nowrap; }
+/* faixas de plataforma (Meta mostarda / Google terracota, translúcidas) */
+.plat-band {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  border: 1px solid var(--border-card); border-radius: 14px;
+  padding: 14px 18px; margin-bottom: 12px;
+}
+.plat-band.meta { background: rgba(189, 138, 12, .10); border-color: rgba(189, 138, 12, .38); }
+.plat-band.google { background: rgba(166, 65, 20, .10); border-color: rgba(166, 65, 20, .38); }
+.pb-name { font-weight: 800; font-size: 14px; width: 108px; flex: none; }
+.pb-kpis { display: flex; gap: 30px; flex-wrap: wrap; align-items: center; flex: 1; }
+.pb-kpi { display: flex; flex-direction: column; }
+.pb-kpi .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.pb-kpi .v { font-size: 18px; font-weight: 700; margin-top: 3px; }
+.pb-badge { margin-left: auto; }
+.pb-note { flex-basis: 100%; font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+/* histórico mensal — grupos de coluna por plataforma */
+.tbl-hist tr.tg th { border-bottom: none; padding-bottom: 3px; }
+.tbl-hist th.gh { text-align: center; font-weight: 700; }
+.tbl-hist th.gh.gm { color: #E0A526; background: rgba(189, 138, 12, .08); border-radius: 6px 6px 0 0; }
+.tbl-hist th.gh.gg { color: #D08A5A; background: rgba(166, 65, 20, .08); border-radius: 6px 6px 0 0; }
+.tbl-hist th.gh.gt { color: var(--text-soft); background: rgba(255, 255, 255, .04); border-radius: 6px 6px 0 0; }
+.badge.amber { color: #F59E0B; background: rgba(245, 158, 11, .13); border: 1px solid rgba(245, 158, 11, .45); }
+/* listas de resultado (criativos / zero retorno / fora da meta) */
+.thumb.xs { width: 32px; height: 32px; border-radius: 6px; }
+.thumb-fb.xs { width: 32px; height: 32px; font-size: 13px; }
+.ri { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--track); }
+.ri:first-child { padding-top: 0; }
+.ri:last-child { border-bottom: none; padding-bottom: 0; }
+.ri-tx { min-width: 0; flex: 1; }
+.ri-nm { font-size: 12.5px; font-weight: 600; color: var(--text); line-height: 1.35; overflow-wrap: anywhere; }
+.ri-nm .muted { color: var(--text-muted); font-weight: 500; }
+.ri-cp { font-size: 11px; color: var(--text-muted); margin-top: 2px; overflow-wrap: anywhere; }
+.ri-vl { font-size: 12px; margin-top: 3px; color: var(--text-soft); }
+.ri-vl .ok { color: var(--green); font-weight: 700; }
+.ri-vl .bad { color: var(--red); font-weight: 700; }
+/* cards de ação (seção 6) */
+.actions { display: flex; flex-direction: column; gap: 10px; margin-bottom: 28px; }
+.action-card {
+  display: flex; gap: 14px; align-items: flex-start;
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-left: 4px solid var(--border-card);
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+.action-card.crit { border-left-color: var(--red); }
+.action-card.ok { border-left-color: var(--green); }
+.action-card.info { border-left-color: var(--amber); }
+.action-card .badge { flex: none; margin-top: 1px; }
+.ac-tx { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.ac-t { font-weight: 700; font-size: 13.5px; line-height: 1.4; }
+.ac-b { color: var(--text-muted); font-size: 12.5px; margin-top: 4px; line-height: 1.55; }
+/* página Qualidade dos dados */
+.q-card { border-left: 4px solid var(--amber); }
+.q-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.q-head h3 { font-size: 15px; font-weight: 700; }
+.q-ic { color: var(--amber); }
+.q-text { font-size: 13px; color: var(--text-soft); line-height: 1.6; margin-bottom: 10px; }
+.q-do { font-size: 12.5px; color: var(--text-muted); line-height: 1.55; background: var(--track); border-radius: 8px; padding: 10px 12px; }
+.q-do strong { color: var(--text-soft); }
+/* responsivo do dashboard de otimização */
+@media (max-width: 1200px) {
+  .grid-3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .pb-kpis { gap: 18px; }
+  .pb-badge { margin-left: 0; flex-basis: 100%; }
+}
