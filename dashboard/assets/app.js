@@ -2417,6 +2417,30 @@ function renderInstitucional(el) {
   const hasPeriod = IM.length > 0;
 
   let html = '<div class="scope-badge">⚠ conta inteira — não é específico desta frente</div>';
+
+  // Controle de investimento do impulsionamento (orçamento mensal via
+  // Variables; granularidade mensal — usa o mês corrente como ciclo)
+  const orcInst = ((DATA.config || {}).orcamento_meta_inst) || 0;
+  const mesAtual = (DATA.last_update || '').slice(6, 10) + '-' +
+    (DATA.last_update || '').slice(3, 5);
+  const rowAtual = (inst.monthly || []).find(r => r.mes === mesAtual);
+  const gastoCiclo = rowAtual ? (rowAtual.gasto || 0) : 0;
+  if (orcInst > 0) {
+    const pct = Math.min(100, gastoCiclo / orcInst * 100);
+    const ok = gastoCiclo <= orcInst;
+    html += '<div class="card" style="margin-bottom:14px">' +
+      '<div class="card-t">Controle de investimento — impulsionamento' +
+      '<span class="card-s">orçamento mensal R$ ' + fmt.dec(orcInst, 2) +
+      ' · gasto do mês corrente (granularidade mensal)</span></div>' +
+      '<div class="big-money">' + fmt.currency(orcInst - gastoCiclo) +
+      ' <span class="badge ' + (ok ? 'green' : 'amber') + '">' +
+      (ok ? 'No orçamento' : 'Estourado') + '</span></div>' +
+      '<div class="pbar"><span style="width:' + pct.toFixed(0) +
+      '%"></span></div>' +
+      '<div class="note">' + fmt.currency(gastoCiclo) + ' gastos de ' +
+      fmt.currency(orcInst) + ' — ' + pct.toFixed(0) + '% usado</div>' +
+      '</div>';
+  }
   html += banner('blue', 'As campanhas de impulsionamento são da <strong>conta inteira</strong> do Instagram/Facebook — não são específicas do e-commerce. ' +
     'Dados com granularidade <strong>mensal</strong>: o filtro de período considera os meses selecionados inteiros. ' +
     'Sem métrica de alcance de propósito: <strong>alcance não é aditivo</strong> (somar alcances diários infla o número) — usamos impressões.');

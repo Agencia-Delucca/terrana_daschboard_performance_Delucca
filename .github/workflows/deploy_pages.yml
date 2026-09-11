@@ -77,6 +77,7 @@ jobs:
           ORCAMENTO_META_ECOM: ${{ vars.ORCAMENTO_META_ECOM }}
           ORCAMENTO_GOOGLE_ECOM: ${{ vars.ORCAMENTO_GOOGLE_ECOM }}
           ORCAMENTO_GOOGLE_B2B: ${{ vars.ORCAMENTO_GOOGLE_B2B }}
+          ORCAMENTO_META_INST: ${{ vars.ORCAMENTO_META_INST }}
         run: |
           python -u main.py
           python -u scripts/generate_dashboard_data.py

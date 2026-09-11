@@ -55,6 +55,7 @@ ORCAMENTO_META_B2B = float(os.getenv("ORCAMENTO_META_B2B", "0") or 0)
 ORCAMENTO_META_ECOM = float(os.getenv("ORCAMENTO_META_ECOM", "0") or 0)
 ORCAMENTO_GOOGLE_ECOM = float(os.getenv("ORCAMENTO_GOOGLE_ECOM", "0") or 0)
 ORCAMENTO_GOOGLE_B2B = float(os.getenv("ORCAMENTO_GOOGLE_B2B", "0") or 0)
+ORCAMENTO_META_INST = float(os.getenv("ORCAMENTO_META_INST", "0") or 0)
 
 # --- Classificação de origem paga (editar conforme as UTMs reais) -------
 # utm_source que conta como tráfego pago de cada plataforma, minúsculo.

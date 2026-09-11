@@ -733,8 +733,13 @@ def classificar_frente(nome):
             or "[vendas]" in n or "[sh]" in n or n.startswith("sh ")
             or n.startswith("sh-") or "shopping" in n):
         return "ecommerce"
-    if n.startswith("impulsionamento") or "instagram post" in n:
+    if ("impulsionamento" in n or "instagram post" in n
+            or "post do instagram" in n):
         return "inst"
+    # O conector do formulário às vezes grava um erro de permissão da API
+    # no lugar do nome da campanha — não é campanha, não vale aviso.
+    if "permissão" in n or "facebook.com/business/help" in n:
+        return "outras"
     print(f"::warning::Campanha sem frente identificável no nome: '{nome}' — "
           "classificada como 'outras'. Combinar a nomenclatura com o gestor.")
     return "outras"
@@ -1231,6 +1236,7 @@ def main():
             "orcamento_meta_ecom": config.ORCAMENTO_META_ECOM,
             "orcamento_google_ecom": config.ORCAMENTO_GOOGLE_ECOM,
             "orcamento_google_b2b": config.ORCAMENTO_GOOGLE_B2B,
+            "orcamento_meta_inst": config.ORCAMENTO_META_INST,
         },
         "leads": leads_agg,
         "crm": crm,
