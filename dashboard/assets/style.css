@@ -165,6 +165,9 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: center; gap: 6px;
   color: var(--text-muted); font-size: 12px;
 }
+/* a regra acima (display:flex) venceria o atributo hidden — sem isto o
+   seletor "Comparar" (exclusivo do e-commerce) aparecia no painel B2B */
+#f-compare-wrap[hidden] { display: none; }
 #period-filter input[type=date],
 #period-filter select {
   background: var(--bg-card);
@@ -643,4 +646,94 @@ body.mode-select #selector {
 @media (max-width: 760px) {
   .pb-kpis { gap: 18px; }
   .pb-badge { margin-left: 0; flex-basis: 100%; }
+}
+
+/* ============================================================
+   E-COMMERCE · Visão Geral (central) — visão executiva, evolução,
+   funil preparado, aquisição, mídia unificada, tabela diária,
+   insights. Sobriedade: hierarquia por tipografia/espaçamento;
+   cor apenas para positivo/negativo/alerta/neutro.
+   ============================================================ */
+/* cards executivos */
+.xkpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.xkpi { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 12px; padding: 13px 14px 11px; }
+.xkpi .xk-lb { color: var(--text-muted); font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 6px; line-height: 1.35; }
+.xk-tag { display: inline-block; font-size: 9px; letter-spacing: .04em; color: var(--text-soft); background: var(--track); border-radius: 5px; padding: 1px 6px; margin-left: 4px; vertical-align: 1px; text-transform: none; }
+.xkpi .xk-vl { font-size: 21px; font-weight: 700; letter-spacing: -.01em; }
+.xk-null { color: var(--text-muted); font-weight: 600; }
+.xd { font-size: 11.5px; font-weight: 700; margin-top: 4px; }
+.xd span { color: var(--text-muted); font-weight: 500; }
+.xd.gd { color: var(--green); }
+.xd.bd { color: var(--red); }
+.xd.nt { color: var(--text-muted); font-weight: 600; }
+.xspark { display: block; width: 100%; height: 26px; margin-top: 7px; }
+.xkpi .xk-sub { color: var(--text-muted); font-size: 10.5px; margin-top: 6px; line-height: 1.4; }
+.xk-dep { display: inline-block; margin-top: 8px; font-size: 10px; font-weight: 600; color: var(--amber); background: rgba(245, 158, 11, .08); border: 1px solid rgba(245, 158, 11, .3); border-radius: 6px; padding: 2px 7px; }
+.xkpi.prep, .prep-card { border-style: dashed; border-color: #4A3620; background: transparent; }
+.xkpis.prep-row { margin-top: 0; margin-bottom: 10px; }
+
+/* funil preparado (GA4 pendente) */
+.funnel-prep { margin: 6px 0 4px; }
+.fp-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.fp-lb { width: 172px; flex: none; text-align: right; color: var(--text-muted); font-size: 12.5px; }
+.fp-track { flex: 1; }
+.fp-bar { height: 26px; border: 1px dashed #4A3620; border-radius: 8px; background: repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(255, 255, 255, .02) 8px, rgba(255, 255, 255, .02) 16px); }
+.fp-pct { width: 60px; flex: none; color: var(--text-muted); font-size: 11px; }
+
+/* análises da loja — cards preparados compactos */
+.prep-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.prep-card { border-radius: 12px; padding: 13px 14px; }
+.prep-card .pc-t { font-size: 13px; font-weight: 700; color: var(--text-soft); }
+.prep-card .pc-d { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.45; }
+
+/* tabelas ordenáveis */
+table.sortable th[data-k], .th-sort { cursor: pointer; user-select: none; }
+table.sortable th[data-k]:hover, .th-sort:hover { color: var(--text-soft); }
+table.sortable th[data-k]::after, .th-sort::after { content: '↕'; opacity: .35; margin-left: 5px; font-size: 9px; }
+th.s-desc::after { content: '↓' !important; opacity: 1 !important; }
+th.s-asc::after { content: '↑' !important; opacity: 1 !important; }
+tr.row-alert td { background: rgba(239, 68, 68, .07); }
+tr.row-prep td { color: var(--text-muted); }
+.dep-tag { display: inline-block; font-size: 10px; font-weight: 600; color: var(--amber); background: rgba(245, 158, 11, .08); border: 1px solid rgba(245, 158, 11, .3); border-radius: 6px; padding: 2px 7px; }
+.ch-sub { color: var(--text-muted); font-size: 10.5px; font-weight: 500; margin-top: 2px; }
+
+/* tabela executiva diária */
+.dt-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.dt-bar input { background: var(--track); border: 1px solid var(--border-card); color: var(--text); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 12.5px; min-width: 210px; }
+.dt-bar input:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+.btn-sec { background: var(--bg-card); border: 1px solid var(--border-card); color: var(--text-soft); border-radius: 8px; padding: 8px 14px; font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; margin-left: auto; }
+.btn-sec:hover { color: var(--text); border-color: #4A3319; }
+.dt-pag { display: flex; align-items: center; gap: 12px; margin-top: 12px; color: var(--text-muted); font-size: 12px; }
+.dt-pag button { background: var(--bg-card); border: 1px solid var(--border-card); color: var(--text-soft); border-radius: 8px; padding: 6px 12px; font-family: inherit; font-size: 12px; cursor: pointer; }
+.dt-pag button:hover:not(:disabled) { color: var(--text); border-color: #4A3319; }
+.dt-pag button:disabled { opacity: .4; cursor: default; }
+
+/* insights (FATO / HIPÓTESE) */
+.ins-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 28px; }
+.ins-card { background: var(--bg-card); border: 1px solid var(--border-card); border-left: 3px solid var(--border-card); border-radius: 12px; padding: 13px 16px; }
+.ins-card.pos { border-left-color: var(--green); }
+.ins-card.neg { border-left-color: var(--red); }
+.ins-card.alerta { border-left-color: var(--amber); }
+.ins-line { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; line-height: 1.55; color: var(--text-soft); }
+.ins-line + .ins-line { margin-top: 7px; }
+.ins-line strong { color: var(--text); }
+.ins-tag { flex: none; font-size: 9px; font-weight: 800; letter-spacing: .08em; border-radius: 5px; padding: 2px 7px; margin-top: 2px; }
+.ins-tag.fato { color: var(--text); background: var(--track); border: 1px solid var(--border-card); }
+.ins-tag.hipo { color: var(--amber); background: rgba(245, 158, 11, .08); border: 1px solid rgba(245, 158, 11, .3); }
+/* nota colada logo abaixo de uma grade de cards (a grade já tem margem) */
+.note.grid-note { margin: -16px 0 28px; }
+
+/* responsivo — desktop-first, colapsos em 1200px e 760px */
+@media (max-width: 1200px) {
+  .xkpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .prep-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ins-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .xkpis, .prep-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fp-lb { width: 108px; }
+  .btn-sec { margin-left: 0; }
+  /* 5 botões de métrica não cabem em 375px: quebram em linhas em vez de
+     alargar a página (rolagem horizontal) */
+  #evo-toggle { display: flex; flex-wrap: wrap; max-width: 100%; }
 }

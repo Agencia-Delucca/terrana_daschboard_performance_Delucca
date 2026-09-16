@@ -19,11 +19,20 @@
 /* ---------- Estado global ---------- */
 let DATA = null;                       // summary.json inteiro
 const CHARTS = {};                     // registry Chart.js (anti-leak)
-const FILTER = { start: null, end: null, preset: 'all' };
+/* FILTER.start/end/preset = janela ATIVA (é o que inPeriod/fdays leem).
+   Cada frente guarda o próprio estado: o B2B mantém os presets originais;
+   o e-commerce ganha presets próprios + seletor de comparação. route()
+   copia o estado da frente ativa para a janela ativa (adoptFilter). */
+const FILTER = {
+  start: null, end: null, preset: 'all',
+  b2b: { start: null, end: null, preset: 'all' },
+  ecom: { start: null, end: null, preset: '30', compare: 'prev' }
+};
 let DATA_MIN = null, DATA_MAX = null;
 let CURRENT_FRONT = null;              // 'b2b' | 'ecom' | null (seletor)
 let LAST_ROUTE = null;                 // 'front/página' — p/ só rolar ao topo em troca de página
 let ECOM_PUB_VIEW = 'ecommerce';       // toggle da página Público do e-commerce
+let ECOM_EVO_METRIC = 'invest';        // métrica ativa do gráfico Evolução (#ecom/visao)
 
 /* ---------- Paleta ----------
    UI (tokens da marca — nav, gradientes, KPI de destaque): P.*
@@ -61,6 +70,9 @@ const fmt = {
   dec: (v, d = 1) => (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }),
   currency: v => 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
   moneyShort: v => 'R$ ' + Math.round(v || 0).toLocaleString('pt-BR'),
+  /* Conversões do Google podem ser fracionárias (atribuição baseada em dados:
+     2,7 conversões) — inteiro fica sem casas; fração mostra até 2 casas. */
+  conv: v => v == null ? '—' : (Math.round(v * 100) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 }),
   pct: (v, d = 1) => v == null ? '—' : fmt.dec(v, d) + '%',
   roas: v => v == null ? '—' : fmt.dec(v, 2) + '×',
   date: iso => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) : '—',
@@ -102,6 +114,10 @@ function dict(src) {
    ============================================================ */
 function inPeriod(d) { return !!d && d >= FILTER.start && d <= FILTER.end; }
 function fdays(list, key = 'dia') { return (list || []).filter(r => inPeriod(r[key])); }
+/* Variante com janela explícita [a,b] — usada pela comparação do e-commerce
+   sem mexer na janela ativa (e sem tocar o comportamento do B2B). */
+function inRange(d, a, b) { return !!d && d >= a && d <= b; }
+function fdaysR(list, a, b, key = 'dia') { return (list || []).filter(r => inRange(r[key], a, b)); }
 function sum(list, k) { return (list || []).reduce((a, r) => a + (r[k] || 0), 0); }
 function monthInPeriod(m) {
   return !!m && m >= (FILTER.start || '').slice(0, 7) && m <= (FILTER.end || '').slice(0, 7);
@@ -116,6 +132,14 @@ function dayRange(a, b) {
   let d = a, guard = 0;
   while (d <= b && guard++ < 4000) { out.push(d); d = addDays(d, 1); }
   return out;
+}
+/* Mesmo dia N meses antes/depois, com clamp no fim do mês (31/03 −1 → 28/02) */
+function shiftMonthIso(iso, delta) {
+  const y = parseInt(iso.slice(0, 4), 10), m = parseInt(iso.slice(5, 7), 10) - 1, d = parseInt(iso.slice(8, 10), 10);
+  const first = new Date(Date.UTC(y, m + delta, 1, 12));
+  const lastDay = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0, 12)).getUTCDate();
+  first.setUTCDate(Math.min(d, lastDay));
+  return first.toISOString().slice(0, 10);
 }
 /* Série diária zero-preenchida dentro da janela coberta pelos dados */
 function dailySeries(rows, fields, key = 'dia') {
@@ -549,7 +573,11 @@ function route() {
     if (pageChanged) window.scrollTo(0, 0);
     return;
   }
-  if (r.front !== CURRENT_FRONT) applyFront(r.front);
+  adoptFilter(r.front);                // janela ativa = estado da frente
+  if (r.front !== CURRENT_FRONT) {
+    applyFront(r.front);
+    updateFilterBar(r.front);          // presets + comparação por frente
+  }
   const f = FRONTS[r.front];
   const page = f.pages.find(p => p.id === r.page);
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page.id));
@@ -630,6 +658,37 @@ function computeDataBounds() {
   DATA_MIN = dates[0] || '2026-01-01';
   DATA_MAX = dates[dates.length - 1] || DATA_MIN;
 }
+/* Limites da série do E-COMMERCE (diário Meta + Google da frente). Presets,
+   datas personalizadas e comparação do painel ecom se ancoram aqui — NÃO no
+   DATA_MIN/DATA_MAX global, que também conta leads/CRM/atendimento do B2B
+   (se o pipeline B2B ficar um dia à frente, "Hoje" não pode sair zerado). */
+let ECOM_BOUNDS = null;
+function ecomBounds() {
+  if (ECOM_BOUNDS && ECOM_BOUNDS.src === DATA) return ECOM_BOUNDS;
+  let min = null, max = null;
+  const scan = list => (list || []).forEach(r => {
+    const d = r && r.dia;
+    if (typeof d !== 'string' || !d) return;
+    if (min == null || d < min) min = d;
+    if (max == null || d > max) max = d;
+  });
+  scan((DATA.meta_ecom || {}).daily);
+  const g = DATA.google_ecom || {};
+  if (g.disponivel === true) scan(g.daily);
+  ECOM_BOUNDS = { src: DATA, min: min || DATA_MIN, max: max || DATA_MAX };
+  return ECOM_BOUNDS;
+}
+function clampEcom(d) {
+  const b = ecomBounds();
+  return d < b.min ? b.min : (d > b.max ? b.max : d);
+}
+function fstate(front) { return front === 'b2b' ? FILTER.b2b : FILTER.ecom; }
+/* Copia o estado da frente para a janela ativa (inPeriod/fdays leem dela) */
+function adoptFilter(front) {
+  const st = fstate(front);
+  FILTER.start = st.start; FILTER.end = st.end; FILTER.preset = st.preset;
+}
+/* Presets do painel B2B — comportamento original, intocado */
 function setPreset(p, rerender) {
   FILTER.preset = p;
   if (p === 'all') {
@@ -639,15 +698,108 @@ function setPreset(p, rerender) {
     FILTER.end = DATA_MAX;
     FILTER.start = addDays(DATA_MAX, -(n - 1));
   }
+  FILTER.b2b.start = FILTER.start; FILTER.b2b.end = FILTER.end; FILTER.b2b.preset = FILTER.preset;
   syncFilterUI();
   if (rerender !== false) route();
+}
+/* Presets do painel E-COMMERCE — âncora = último dia com dados DO E-COMMERCE
+   (ecomBounds().max), não o relógio nem o DATA_MAX global: "Hoje" é o último
+   dia coberto pela atualização — e o rótulo do preset mostra a data. */
+function setPresetEcom(p, rerender) {
+  const st = FILTER.ecom;
+  const MX = ecomBounds().max;
+  st.preset = p;
+  if (p === 'hoje') { st.start = MX; st.end = MX; }
+  else if (p === 'ontem') { st.start = st.end = addDays(MX, -1); }
+  else if (p === 'mes_atual') { st.start = MX.slice(0, 7) + '-01'; st.end = MX; }
+  else if (p === 'mes_ant') {
+    const fimAnt = addDays(MX.slice(0, 7) + '-01', -1);
+    st.start = fimAnt.slice(0, 7) + '-01'; st.end = fimAnt;
+  } else if (p !== 'custom') {
+    const n = parseInt(p, 10);
+    st.end = MX;
+    st.start = addDays(MX, -(n - 1));
+  }
+  // nunca fora da série: dia sem cobertura não pode virar R$ 0,00
+  if (st.start && st.end) {
+    const a = clampEcom(st.start), z = clampEcom(st.end);
+    st.adjusted = a !== st.start || z !== st.end;
+    st.start = a; st.end = z;
+  }
+  adoptFilter('ecom');
+  syncFilterUI();
+  if (rerender !== false) route();
+}
+/* Janela de comparação do e-commerce (null = comparação desligada).
+   · "mês anterior" com mês(es) cheio(s) compara com o mês anterior inteiro
+     (setembro 01–30 × agosto 01–31, sem perder o dia 31);
+   · se a janela passa de um mês, o "mês anterior" se sobreporia a ela →
+     cai para o período anterior de mesmo tamanho, avisando no rótulo;
+   · cobertura: 'total' | 'parcial' | 'nenhuma' frente ao início da série. */
+function ecomCompareRange() {
+  const st = FILTER.ecom;
+  if (!st.start || !st.end || st.compare === 'none') return null;
+  const n = dayRange(st.start, st.end).length;
+  const anterior = extra => ({ a: addDays(st.start, -n), b: addDays(st.start, -1), label: 'período anterior de mesmo tamanho' + (extra || '') });
+  let r;
+  if (st.compare === 'prev_month') {
+    const fimDoMes = iso => addDays(shiftMonthIso(iso.slice(0, 7) + '-01', 1), -1);
+    const mesesCheios = st.start.slice(8, 10) === '01' && st.end === fimDoMes(st.end);
+    r = mesesCheios
+      ? { a: shiftMonthIso(st.start, -1), b: addDays(st.end.slice(0, 7) + '-01', -1), label: 'mesmo período do mês anterior' }
+      : { a: shiftMonthIso(st.start, -1), b: shiftMonthIso(st.end, -1), label: 'mesmo período do mês anterior' };
+    if (r.b >= st.start) r = anterior(' — a janela passa de um mês e o mês anterior se sobreporia a ela');
+  } else {
+    r = anterior();
+  }
+  const bd = ecomBounds();
+  r.cobertura = r.b < bd.min ? 'nenhuma' : (r.a < bd.min ? 'parcial' : 'total');
+  return r;
+}
+const PRESETS_B2B = [
+  ['all', 'Todo período'], ['7', 'Últimos 7 dias'], ['30', 'Últimos 30 dias'],
+  ['90', 'Últimos 90 dias'], ['custom', 'Personalizado', true]
+];
+/* Presets do e-commerce com a âncora explícita no rótulo ("Hoje" = último
+   dia com dados da frente, não o relógio). */
+function presetsEcom() {
+  const MX = ecomBounds().max;
+  const mesAnt = addDays(MX.slice(0, 7) + '-01', -1).slice(0, 7);
+  return [
+    ['hoje', 'Hoje (último dado: ' + fmt.date(MX) + ')'], ['ontem', 'Ontem (' + fmt.date(addDays(MX, -1)) + ')'],
+    ['7', 'Últimos 7 dias'], ['14', 'Últimos 14 dias'], ['30', 'Últimos 30 dias'],
+    ['mes_atual', 'Mês atual (' + mesLabel(MX.slice(0, 7)) + ')'], ['mes_ant', 'Mês anterior (' + mesLabel(mesAnt) + ')'],
+    ['custom', 'Personalizado']
+  ];
+}
+/* Troca as opções do seletor de período conforme a frente e mostra/esconde
+   o seletor de comparação (exclusivo do e-commerce). */
+function updateFilterBar(front) {
+  const sel = document.getElementById('f-preset');
+  const cmpWrap = document.getElementById('f-compare-wrap');
+  if (sel) {
+    const list = front === 'ecom' ? presetsEcom() : PRESETS_B2B;
+    sel.innerHTML = list.map(o =>
+      '<option value="' + o[0] + '"' + (o[2] ? ' hidden' : '') + '>' + esc(o[1]) + '</option>').join('');
+  }
+  if (cmpWrap) cmpWrap.hidden = front !== 'ecom';
+  // datas do e-commerce limitadas à série da frente; B2B segue sem limites
+  ['f-start', 'f-end'].forEach(id => {
+    const inp = document.getElementById(id);
+    if (!inp) return;
+    if (front === 'ecom') { const bd = ecomBounds(); inp.min = bd.min; inp.max = bd.max; }
+    else { inp.removeAttribute('min'); inp.removeAttribute('max'); }
+  });
+  syncFilterUI();
 }
 function syncFilterUI() {
   const s = document.getElementById('f-start'), e = document.getElementById('f-end');
   const sel = document.getElementById('f-preset');
+  const cmp = document.getElementById('f-compare');
   if (s) s.value = FILTER.start || '';
   if (e) e.value = FILTER.end || '';
   if (sel) sel.value = FILTER.preset;
+  if (cmp) cmp.value = FILTER.ecom.compare;
 }
 function onDateInput() {
   const s = document.getElementById('f-start').value;
@@ -655,17 +807,52 @@ function onDateInput() {
   // Campo apagado: restaura a UI para o filtro APLICADO — senão o input
   // ficaria vazio com os dados ainda filtrados pelo valor antigo.
   if (!s || !e) { syncFilterUI(); return; }
-  FILTER.start = s <= e ? s : e;
-  FILTER.end = s <= e ? e : s;
-  FILTER.preset = 'custom';
+  const st = fstate(CURRENT_FRONT || 'b2b');
+  if (CURRENT_FRONT === 'ecom') {
+    // Ano ainda sendo digitado (0002, 0020, 0202…): espera completar — o
+    // blur devolve o filtro aplicado se o campo for abandonado assim.
+    if (s < '1900' || e < '1900') return;
+    // Datas presas à série do e-commerce: fora dela não há dado (nem zero)
+    const a0 = s <= e ? s : e, z0 = s <= e ? e : s;
+    const a = clampEcom(a0), z = clampEcom(z0);
+    st.adjusted = a !== a0 || z !== z0;
+    st.start = a; st.end = z;
+  } else {
+    st.start = s <= e ? s : e;
+    st.end = s <= e ? e : s;
+  }
+  st.preset = 'custom';
+  FILTER.start = st.start; FILTER.end = st.end; FILTER.preset = 'custom';
   syncFilterUI();
   route();
 }
 function buildFilterUI() {
   document.getElementById('f-start').addEventListener('change', onDateInput);
   document.getElementById('f-end').addEventListener('change', onDateInput);
+  // E-commerce: campo abandonado com ano incompleto (0002…) volta ao filtro aplicado
+  ['f-start', 'f-end'].forEach(id => {
+    const inp = document.getElementById(id);
+    inp.addEventListener('blur', () => {
+      if (CURRENT_FRONT === 'ecom' && inp.value && inp.value < '1900') syncFilterUI();
+    });
+  });
   document.getElementById('f-preset').addEventListener('change', ev => {
-    if (ev.target.value !== 'custom') setPreset(ev.target.value);
+    const v = ev.target.value;
+    if (v === 'custom') {
+      // "Personalizado" no e-commerce: marca o preset e leva o foco às datas
+      if (CURRENT_FRONT === 'ecom') {
+        FILTER.ecom.preset = 'custom';
+        const s = document.getElementById('f-start');
+        if (s) s.focus();
+      }
+      return;
+    }
+    if (CURRENT_FRONT === 'ecom') setPresetEcom(v); else setPreset(v);
+  });
+  const cmp = document.getElementById('f-compare');
+  if (cmp) cmp.addEventListener('change', ev => {
+    FILTER.ecom.compare = ev.target.value;
+    if (CURRENT_FRONT === 'ecom') route();
   });
 }
 
@@ -1078,11 +1265,13 @@ function otHistHtml(c) {
       '<strong>Custo/lead</strong> = investimento Meta ÷ leads CRM do mês — aproximação enquanto o rastreamento não cobre 100% (detalhe na página Qualidade dos dados). ' +
       'Google Ads: "—" até existirem campanhas B2B. <strong>Parcial</strong> = mês corrente em andamento.';
   } else {
+    // E-commerce: receitas atribuídas NUNCA somadas entre plataformas —
+    // o bloco Total traz só o investimento (único número agregável).
     head = '<tr class="tg"><th></th>' +
-      '<th colspan="5" class="gh gm">Meta Ads</th><th colspan="4" class="gh gg">Google Ads</th><th colspan="2" class="gh gt">Total</th></tr>' +
+      '<th colspan="5" class="gh gm">Meta Ads</th><th colspan="4" class="gh gg">Google Ads</th><th class="gh gt">Total</th></tr>' +
       '<tr><th>Mês</th><th class="r">Investimento</th><th class="r">Compras</th><th class="r">Receita</th><th class="r">ROAS</th><th class="r">CPA</th>' +
       '<th class="r">Investimento</th><th class="r">Conversões</th><th class="r">Valor</th><th class="r">ROAS</th>' +
-      '<th class="r">Investimento</th><th class="r">Receita total</th></tr>';
+      '<th class="r">Investimento</th></tr>';
     body = hist.map(h => {
       const m = h.meta || {}, g = h.google || {};
       const gOn = g.gasto != null;
@@ -1096,14 +1285,13 @@ function otHistHtml(c) {
         '<td class="r">' + fmt.roas(roasM) + '</td>' +
         '<td class="r">' + (cpaM == null ? '—' : fmt.currency(cpaM)) + '</td>' +
         '<td class="r">' + (gOn ? fmt.currency(g.gasto || 0) : '—') + '</td>' +
-        '<td class="r">' + (gOn ? fmt.num(g.conversoes || 0) : '—') + '</td>' +
+        '<td class="r">' + (gOn ? fmt.conv(g.conversoes || 0) : '—') + '</td>' +
         '<td class="r">' + (gOn ? fmt.currency(g.valor_conversoes || 0) : '—') + '</td>' +
         '<td class="r">' + fmt.roas(roasG) + '</td>' +
-        '<td class="r">' + fmt.currency((m.gasto || 0) + (g.gasto || 0)) + '</td>' +
-        '<td class="r">' + fmt.currency((m.valor_compras || 0) + (g.valor_conversoes || 0)) + '</td></tr>';
+        '<td class="r">' + fmt.currency((m.gasto || 0) + (g.gasto || 0)) + '</td></tr>';
     }).join('');
     nota = 'Compras e receita da Meta: <strong>pixel</strong>; conversões e valor do Google: <strong>atribuição da plataforma</strong> — referência, não venda confirmada. ' +
-      '<strong>Receita total</strong> soma as duas atribuições (podem se sobrepor). <strong>Parcial</strong> = mês corrente em andamento.';
+      'As receitas das duas plataformas <strong>não se somam</strong> (atribuições independentes, podem se sobrepor) — o Total traz só o investimento. <strong>Parcial</strong> = mês corrente em andamento.';
   }
   return card('Histórico mensal', 'mês a mês — independe do filtro de período',
     '<div class="table-wrap"><table class="tbl-hist"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
@@ -2160,10 +2348,832 @@ function renderQualidade(el, front) {
 }
 
 /* ============================================================
-   E-COMMERCE · VISÃO GERAL — dashboard de otimização + detalhe
-   da frente (receita/ROAS do pixel preservados abaixo)
+   E-COMMERCE · VISÃO GERAL — CENTRAL DO E-COMMERCE
+   Hierarquia: NEGÓCIO → VENDAS → AQUISIÇÃO → FUNIL → PRODUTOS →
+   MÍDIA → DIAGNÓSTICOS.
+   Regra de atribuição (crítica): compras/receita do pixel Meta e
+   conversões/valor do Google são atribuídos POR PLATAFORMA e NUNCA
+   somados como "receita total" — o único agregável é o investimento.
+   Tudo que depende da loja/GA4 fica em ESTADO PREPARADO, sem simulação.
    ============================================================ */
-function renderVisaoEcom(el) { renderOtimizacao(el, 'ecom'); }
+
+/* Direção por métrica: 'up' = subir é bom (verde) · 'down' = subir é
+   ruim (vermelho) · 'neutral' = sem juízo (investimento). */
+const METRIC_DIR = {
+  invest: 'neutral', compras: 'up', conversoes: 'up', receita: 'up',
+  roas: 'up', cliques: 'up', ctr: 'up', cpa: 'down', cpc: 'down', cpm: 'down'
+};
+
+/* ---------- séries diárias da frente numa janela ----------
+   Dia DENTRO da série do e-commerce sem linha = 0 (sem veiculação); dia FORA
+   da série (antes do 1º / depois do último dado) = null, nunca R$ 0,00.
+   Google indisponível = séries do Google null (o total usa só a Meta). */
+function ecvDaily(a, b) {
+  const g = DATA.google_ecom || {};
+  const gOk = g.disponivel === true && !!g.daily;
+  const bd = ecomBounds();
+  const me = fdaysR((DATA.meta_ecom || {}).daily, a, b);
+  const gd = gOk ? fdaysR(g.daily, a, b) : [];
+  const days = dayRange(a, b);
+  const cov = days.map(d => d >= bd.min && d <= bd.max);
+  const ix = (rows, f, ok) => { const m = dayIdx(rows, f); return days.map((d, i) => (ok && cov[i]) ? (m[d] || 0) : null); };
+  const gastoM = ix(me, 'gasto', true), comprasM = ix(me, 'compras', true), recM = ix(me, 'valor_compras', true);
+  const cliM = ix(me, 'cliques_link', true), impM = ix(me, 'impressoes', true);
+  const gastoG = ix(gd, 'gasto', gOk), convG = ix(gd, 'conversoes', gOk), recG = ix(gd, 'valor_conversoes', gOk), cliG = ix(gd, 'cliques', gOk);
+  const ratio = (num, den) => days.map((d, i) => (num[i] != null && den[i] > 0) ? num[i] / den[i] : null);
+  return {
+    days, gOk, gastoM, comprasM, recM, cliM, impM, gastoG, convG, recG, cliG,
+    investTot: days.map((d, i) => (gastoM[i] == null && gastoG[i] == null) ? null : (gastoM[i] || 0) + (gastoG[i] || 0)),
+    roasM: ratio(recM, gastoM), roasG: ratio(recG, gastoG),
+    cpaM: ratio(gastoM, comprasM), cpaG: ratio(gastoG, convG)
+  };
+}
+/* ---------- totais da frente numa janela ---------- */
+function ecvTotals(a, b) {
+  const g = DATA.google_ecom || {};
+  const gOk = g.disponivel === true && !!g.daily;
+  const me = fdaysR((DATA.meta_ecom || {}).daily, a, b);
+  const gd = gOk ? fdaysR(g.daily, a, b) : [];
+  const t = {
+    gOk,
+    gastoM: sum(me, 'gasto'), comprasM: sum(me, 'compras'), recM: sum(me, 'valor_compras'),
+    cliM: sum(me, 'cliques_link'), impM: sum(me, 'impressoes'),
+    gastoG: sum(gd, 'gasto'), convG: sum(gd, 'conversoes'), recG: sum(gd, 'valor_conversoes'),
+    cliG: sum(gd, 'cliques'), impG: sum(gd, 'impressoes')
+  };
+  t.invest = t.gastoM + t.gastoG;
+  t.roasM = t.gastoM > 0 ? t.recM / t.gastoM : null;
+  t.roasG = t.gastoG > 0 ? t.recG / t.gastoG : null;
+  t.cpaM = t.comprasM > 0 ? t.gastoM / t.comprasM : null;
+  t.cpaG = t.convG > 0 ? t.gastoG / t.convG : null;
+  t.ctrM = t.impM > 0 ? t.cliM / t.impM * 100 : null;
+  t.ctrG = t.impG > 0 ? t.cliG / t.impG * 100 : null;
+  return t;
+}
+function pctDelta(cur, prev) {
+  if (cur == null || prev == null || !(prev > 0)) return null;
+  return (cur - prev) / prev * 100;
+}
+/* Seta/cor com a direção correta por métrica (mapa METRIC_DIR).
+   nota = motivo quando não há base (ex.: comparação fora da série). */
+function deltaHtml(cur, prev, dirKey, hasComp, nota) {
+  if (!hasComp) return '';
+  const dir = METRIC_DIR[dirKey] || 'neutral';
+  if (cur == null || prev == null) return '<div class="xd nt">' + (nota || 'sem base de comparação') + '</div>';
+  if (!(prev > 0)) {
+    // base zero (ex.: ROAS 0,00× = gasto sem receita): sem % e sem "novo"
+    return cur > 0 ? '<div class="xd nt">saiu de 0 <span>base zero, sem %</span></div>' : '<div class="xd nt">0 nos dois períodos</div>';
+  }
+  const d = (cur - prev) / prev * 100;
+  const flat = Math.abs(d) < 0.05;
+  const arrow = flat ? '•' : (d > 0 ? '▲' : '▼');
+  let cls = 'nt';
+  if (!flat && dir !== 'neutral') cls = ((d > 0) === (dir === 'up')) ? 'gd' : 'bd';
+  return '<div class="xd ' + cls + '">' + arrow + ' ' + (d > 0 ? '+' : '') + fmt.dec(d, 1) +
+    '% <span>vs comp.</span></div>';
+}
+
+/* ---------- cards executivos (valor + variação + sparkline) ---------- */
+let ECV_SPARKS = [];
+function xkpi(label, valueHtml, delta, sub, spark) {
+  let sparkHtml = '';
+  // linha precisa de ≥ 2 pontos: com 1 dia (Hoje/Ontem) o canvas ficaria em branco
+  if (spark && spark.vals && spark.vals.filter(v => v != null).length >= 2 && spark.vals.some(v => v != null && v !== 0)) {
+    const id = 'sp-' + (ECV_SPARKS.length + 1);
+    ECV_SPARKS.push({ id, vals: spark.vals, color: spark.color || P.accentLight });
+    sparkHtml = '<canvas class="xspark" id="' + id + '"></canvas>';
+  }
+  return '<div class="xkpi">' +
+    '<div class="xk-lb">' + label + '</div>' +
+    '<div class="xk-vl">' + (valueHtml == null ? '<span class="xk-null">—</span>' : valueHtml) + '</div>' +
+    (delta || '') + sparkHtml +
+    (sub ? '<div class="xk-sub">' + sub + '</div>' : '') + '</div>';
+}
+function xkpiPrep(label, formula, dep) {
+  return '<div class="xkpi prep">' +
+    '<div class="xk-lb">' + label + '</div>' +
+    '<div class="xk-vl"><span class="xk-null">—</span></div>' +
+    '<div class="xk-sub">' + formula + '</div>' +
+    '<div class="xk-dep">depende de: ' + dep + '</div></div>';
+}
+/* Sparkline: mini-canvas sem eixos, últimos dias do período filtrado */
+function drawSparks() {
+  ECV_SPARKS.forEach(s => {
+    const c = document.getElementById(s.id);
+    if (!c) return;
+    const W = c.clientWidth || 160, H = c.clientHeight || 26;
+    c.width = W * 2; c.height = H * 2;
+    const ctx = c.getContext('2d');
+    ctx.scale(2, 2);
+    const vals = s.vals;
+    const pts = vals.map((v, i) => ({ i, v })).filter(p => p.v != null);
+    if (pts.length < 2) return;
+    let min = Infinity, max = -Infinity;
+    pts.forEach(p => { if (p.v < min) min = p.v; if (p.v > max) max = p.v; });
+    if (max === min) max = min + 1;
+    const x = i => vals.length > 1 ? i / (vals.length - 1) * (W - 4) + 2 : W / 2;
+    const y = v => H - 3 - (v - min) / (max - min) * (H - 6);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = s.color;
+    ctx.beginPath();
+    let started = false;
+    vals.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      if (!started) { ctx.moveTo(x(i), y(v)); started = true; }
+      else ctx.lineTo(x(i), y(v));
+    });
+    ctx.stroke();
+    const last = pts[pts.length - 1];
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(x(last.i), y(last.v), 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+/* Redesenha as sparklines quando a largura dos cards muda (rotação no
+   celular, janela redimensionada, breakpoint): ResizeObserver com debounce
+   na grade de cards. Um observador por render — o anterior é desconectado,
+   e ele se desconecta sozinho quando a grade sai da página (anti-leak). */
+let ECV_SPARK_RO = null, ECV_SPARK_RESIZE = null;
+function wireSparkResize(host) {
+  if (ECV_SPARK_RO) { ECV_SPARK_RO.disconnect(); ECV_SPARK_RO = null; }
+  if (!host || !ECV_SPARKS.length) return;
+  let t = null, lastW = host.clientWidth;
+  const redraw = () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      if (host.isConnected && document.querySelector('canvas.xspark')) drawSparks();
+    }, 120);
+  };
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(() => {
+      if (!host.isConnected) { ro.disconnect(); if (ECV_SPARK_RO === ro) ECV_SPARK_RO = null; return; }
+      const w = host.clientWidth;
+      if (w === lastW) return;
+      lastW = w;
+      redraw();
+    });
+    ro.observe(host);
+    ECV_SPARK_RO = ro;
+  } else if (!ECV_SPARK_RESIZE) {                 // navegador sem ResizeObserver
+    ECV_SPARK_RESIZE = () => { if (CURRENT_FRONT === 'ecom' && ECV_SPARKS.length) drawSparks(); };
+    window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(ECV_SPARK_RESIZE, 150); });
+  }
+}
+
+/* ---------- tabelas ordenáveis client-side ----------
+   th[data-k]="num"|"txt" · células numéricas com data-s ·
+   linhas .row-prep (canais preparados) ficam sempre no fim. */
+function sortableWrap(headCells, rowsHtml, extraCls) {
+  return '<div class="table-wrap"><table class="sortable' + (extraCls ? ' ' + extraCls : '') + '"><thead><tr>' +
+    headCells.map(h => '<th' + (h.r ? ' class="r"' : '') + (h.k ? ' data-k="' + h.k + '"' : '') + '>' + h.t + '</th>').join('') +
+    '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+}
+function tdNum(v, f, cls) {
+  return '<td class="r' + (cls ? ' ' + cls : '') + '" data-s="' + (v == null ? '' : v) + '">' +
+    (v == null ? '—' : f(v)) + '</td>';
+}
+function wireSortables(root) {
+  root.querySelectorAll('table.sortable').forEach(tbl => {
+    tbl.querySelectorAll('th[data-k]').forEach(th => {
+      th.addEventListener('click', () => {
+        const desc = !th.classList.contains('s-desc');   // 1º clique = desc
+        tbl.querySelectorAll('th').forEach(x => x.classList.remove('s-asc', 's-desc'));
+        th.classList.add(desc ? 's-desc' : 's-asc');
+        const idx = th.cellIndex, kind = th.dataset.k, sign = desc ? -1 : 1;
+        const tb = tbl.tBodies[0];
+        const rows = Array.from(tb.rows);
+        const prep = rows.filter(r => r.classList.contains('row-prep'));
+        const data = rows.filter(r => !r.classList.contains('row-prep'));
+        const val = r => {
+          const cell = r.cells[idx];
+          if (!cell) return null;
+          if (kind === 'num') {
+            const v = cell.dataset.s;
+            return (v === '' || v == null) ? null : parseFloat(v);
+          }
+          return (cell.dataset.s != null ? cell.dataset.s : cell.textContent).trim().toLowerCase();
+        };
+        data.sort((ra, rb) => {
+          const va = val(ra), vb = val(rb);
+          if (va == null && vb == null) return 0;
+          if (va == null) return 1;                      // nulos sempre no fim
+          if (vb == null) return -1;
+          return (va < vb ? -1 : va > vb ? 1 : 0) * sign;
+        });
+        data.concat(prep).forEach(r => tb.appendChild(r));
+      });
+    });
+  });
+}
+
+/* ---------- gráfico Evolução (métrica a escolher + comparação) ---------- */
+function ecvEvoChart(dd, ddPrev) {
+  const M = ECOM_EVO_METRIC;
+  // [rótulo, série, cor, indisponível?] por métrica — sempre por plataforma,
+  // receitas nunca somadas (atribuição separada).
+  const mk = d => {
+    if (M === 'invest') return [['Investimento Meta', d.gastoM, S.terracota], ['Investimento Google', d.gastoG, GOOGLE_INV, !d.gOk]];
+    if (M === 'compras') return [['Compras (Meta)', d.comprasM, S.oliva], ['Conversões (Google)', d.convG, GOOGLE_RES, !d.gOk]];
+    if (M === 'receita') return [['Receita atrib. Meta', d.recM, S.mostarda], ['Receita atrib. Google', d.recG, AMBER_RAMP[1], !d.gOk]];
+    if (M === 'roas') return [['ROAS Meta', d.roasM, S.mostarda], ['ROAS Google', d.roasG, GOOGLE_RES, !d.gOk]];
+    return [['CPA Meta', d.cpaM, S.terracota], ['Custo/conv. Google', d.cpaG, GOOGLE_INV, !d.gOk]];
+  };
+  const money = (M === 'invest' || M === 'receita' || M === 'cpa');
+  const NEUTRAL = ['#8B7A64', '#5E5142'];               // período comparado — tons neutros
+  const datasets = [];
+  mk(dd).forEach(s => {
+    if (s[3]) return;
+    datasets.push(lineDs(s[0], s[1], s[2], { pointRadius: 2, spanGaps: false }));
+  });
+  let compDays = null;
+  if (ddPrev) {
+    compDays = ddPrev.days;
+    mk(ddPrev).forEach((s, i) => {
+      if (s[3]) return;
+      // alinhado por índice de dia (1º dia com 1º dia do período comparado)
+      const arr = dd.days.map((d2, j) => j < s[1].length ? s[1][j] : null);
+      datasets.push({
+        label: s[0] + ' — comparado', data: arr,
+        borderColor: NEUTRAL[i % NEUTRAL.length], backgroundColor: 'transparent',
+        borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 4,
+        tension: .3, spanGaps: false, __comp: true
+      });
+    });
+  }
+  // contagens via fmt.conv: conversões do Google podem ser fracionárias (2,7)
+  const fmtVal = v => M === 'roas' ? fmt.dec(v, 2) + '×' : (money ? fmt.currency(v) : fmt.conv(v));
+  makeChart('ch-ecv-evo', {
+    type: 'line',
+    data: { labels: dd.days.map(fmt.date), datasets },
+    options: baseOpts({
+      plugins: {
+        legend: legendTop(),
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const v = ctx.parsed.y;
+              if (v == null) return ctx.dataset.label + ': sem dado';
+              let t = ctx.dataset.label + ': ' + fmtVal(v);
+              if (ctx.dataset.__comp && compDays && compDays[ctx.dataIndex]) {
+                t += ' (' + fmt.dateFull(compDays[ctx.dataIndex]) + ')';
+              }
+              return t;
+            }
+          }
+        }
+      },
+      scales: {
+        x: xDaily(),
+        y: money ? yMoney() : (M === 'roas'
+          ? yCount({ ticks: { callback: v => fmt.dec(v, 1) + '×' } })
+          : yCount())
+      }
+    })
+  });
+}
+
+/* ---------- tabela executiva diária (busca + ordenação + paginação + CSV) ---------- */
+function ecvDailyTable(dd) {
+  // Google indisponível → colunas do Google null ("—" na tela, vazio no CSV),
+  // nunca R$ 0,00 inventado; o total passa a ser só a Meta (nota abaixo).
+  const rows = dd.days.map((d, i) => {
+    const investM = dd.gastoM[i], investG = dd.gastoG[i];
+    return {
+      d, invest: (investM == null && investG == null) ? null : (investM || 0) + (investG || 0), investM, investG,
+      compras: dd.comprasM[i], recM: dd.recM[i],
+      conv: dd.convG[i], recG: dd.recG[i],
+      cpaM: (investM != null && dd.comprasM[i] > 0) ? investM / dd.comprasM[i] : null,
+      roasM: investM > 0 ? dd.recM[i] / investM : null,
+      roasG: investG > 0 ? dd.recG[i] / investG : null
+    };
+  });
+  const stt = { page: 0, q: '', k: 'd', dir: -1 };       // padrão: data desc
+  const PAGE = 20;
+  const cols = [
+    { k: 'd', t: 'Data', f: fmt.dateFull },
+    { k: 'invest', t: 'Invest. total', f: fmt.currency },
+    { k: 'investM', t: 'Invest. Meta', f: fmt.currency },
+    { k: 'investG', t: 'Invest. Google', f: fmt.currency },
+    { k: 'compras', t: 'Compras (Meta)', f: fmt.num },
+    { k: 'recM', t: 'Receita atrib. Meta', f: fmt.currency },
+    { k: 'conv', t: 'Conversões (Google)', f: fmt.conv },
+    { k: 'recG', t: 'Receita atrib. Google', f: fmt.currency },
+    { k: 'cpaM', t: 'CPA Meta', f: fmt.currency },
+    { k: 'roasM', t: 'ROAS Meta', f: fmt.roas },
+    { k: 'roasG', t: 'ROAS Google', f: fmt.roas }
+  ];
+  const filtered = () => {
+    let out = rows;
+    if (stt.q) out = out.filter(r => fmt.dateFull(r.d).indexOf(stt.q) >= 0);
+    return out.slice().sort((ra, rb) => {
+      const va = ra[stt.k], vb = rb[stt.k];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return (va < vb ? -1 : va > vb ? 1 : 0) * stt.dir;
+    });
+  };
+  const draw = () => {
+    const list = filtered();
+    const pages = Math.max(1, Math.ceil(list.length / PAGE));
+    if (stt.page >= pages) stt.page = pages - 1;
+    const slice = list.slice(stt.page * PAGE, stt.page * PAGE + PAGE);
+    const head = '<tr>' + cols.map(c2 =>
+      '<th class="' + (c2.k === 'd' ? '' : 'r ') + 'th-sort' +
+      (stt.k === c2.k ? (stt.dir === 1 ? ' s-asc' : ' s-desc') : '') +
+      '" data-dk="' + c2.k + '">' + c2.t + '</th>').join('') + '</tr>';
+    const body = slice.map(r => '<tr>' + cols.map(c2 => {
+      const v = r[c2.k];
+      const txt = c2.k === 'd' ? fmt.dateFull(v) : (v == null ? '—' : c2.f(v));
+      return '<td' + (c2.k === 'd' ? '' : ' class="r"') + '>' + txt + '</td>';
+    }).join('') + '</tr>').join('');
+    const elT = document.getElementById('dt-table');
+    const elP = document.getElementById('dt-pag');
+    if (!elT || !elP) return;
+    elT.innerHTML = '<div class="table-wrap"><table><thead>' + head + '</thead><tbody>' +
+      (body || '<tr><td colspan="' + cols.length + '" class="dim">Nenhum dia encontrado para a busca.</td></tr>') +
+      '</tbody></table></div>';
+    elP.innerHTML =
+      '<button type="button" id="dt-prev"' + (stt.page === 0 ? ' disabled' : '') + '>‹ Anterior</button>' +
+      '<span>página ' + (stt.page + 1) + ' de ' + pages + ' · ' + fmt.num(list.length) + ' dia(s)</span>' +
+      '<button type="button" id="dt-next"' + (stt.page >= pages - 1 ? ' disabled' : '') + '>Próxima ›</button>';
+    document.getElementById('dt-prev').addEventListener('click', () => { if (stt.page > 0) { stt.page--; draw(); } });
+    document.getElementById('dt-next').addEventListener('click', () => { if (stt.page < pages - 1) { stt.page++; draw(); } });
+    elT.querySelectorAll('th[data-dk]').forEach(th => th.addEventListener('click', () => {
+      const k = th.dataset.dk;
+      if (stt.k === k) stt.dir = -stt.dir; else { stt.k = k; stt.dir = -1; }
+      draw();
+    }));
+  };
+  const q = document.getElementById('dt-q');
+  if (q) q.addEventListener('input', ev2 => { stt.q = ev2.target.value.trim(); stt.page = 0; draw(); });
+  const csv = document.getElementById('dt-csv');
+  if (csv) csv.addEventListener('click', () => {
+    const list = filtered();
+    // Padrão do Excel em português: separador ";" e decimal ",". Com "," como
+    // separador o Excel pt-BR abre tudo na coluna A; com ";" + ponto decimal
+    // ele leria 32.66 como texto/data. Sem separador de milhar.
+    const n2 = v => v == null ? '' : String(Math.round(v * 100) / 100).replace('.', ',');
+    const busca = stt.q ? stt.q.replace(/[;"\r\n]/g, ' ') : '';
+    const lines = [
+      '# Terrana E-commerce — tabela executiva diária · período ' +
+      fmt.dateFull(FILTER.ecom.start) + ' a ' + fmt.dateFull(FILTER.ecom.end) +
+      (busca ? ' · filtrado pela busca "' + busca + '": ' + list.length + ' de ' + rows.length + ' dia(s)' : ''),
+      '# Separador: ponto e vírgula · decimais com vírgula (padrão do Excel em português) · datas em dd/mm/aaaa · ' +
+      'receitas atribuídas por cada plataforma — NÃO somar Meta + Google' +
+      (dd.gOk ? '' : ' · Google Ads sem dados: colunas do Google vazias e investimento total = só Meta'),
+      'data;investimento_total;investimento_meta;investimento_google;compras_meta;' +
+      'receita_atrib_meta;conversoes_google;receita_atrib_google;cpa_meta;roas_meta;roas_google'
+    ];
+    list.forEach(r => lines.push([
+      fmt.dateFull(r.d), n2(r.invest), n2(r.investM), n2(r.investG), n2(r.compras),
+      n2(r.recM), n2(r.conv), n2(r.recG), n2(r.cpaM), n2(r.roasM), n2(r.roasG)
+    ].join(';')));
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'terrana-ecom-diario_' + FILTER.ecom.start + '_' + FILTER.ecom.end + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    // revogar só depois: com 0 ms o Firefox/Safari podem cancelar o download
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  });
+  draw();
+}
+
+/* ---------- insights matemáticos (FATO sempre · HIPÓTESE prudente) ---------- */
+function ecvInsightCard(kind, factHtml, hypoHtml) {
+  return '<div class="ins-card ' + kind + '">' +
+    '<div class="ins-line"><span class="ins-tag fato">FATO</span><span>' + factHtml + '</span></div>' +
+    (hypoHtml ? '<div class="ins-line"><span class="ins-tag hipo">HIPÓTESE</span><span>possível causa a investigar: ' + hypoHtml + '</span></div>' : '') +
+    '</div>';
+}
+function ecvInsights(cur, prev, st, comp) {
+  const cards = [];
+  const sig = v => (v > 0 ? '+' : '') + fmt.dec(v, 1) + '%';
+
+  if (prev) {
+    // investimento × compras (base zero = sem %: "saiu de 0" / "seguiu em 0")
+    const dInv = pctDelta(cur.invest, prev.invest);
+    const dCom = pctDelta(cur.comprasM, prev.comprasM);
+    if (dInv != null || dCom != null) {
+      const txtInv = dInv != null
+        ? 'variou <strong>' + sig(dInv) + '</strong> (' + fmt.currency(prev.invest) + ' → ' + fmt.currency(cur.invest) + ')'
+        : (cur.invest > 0 ? 'saiu de ' + fmt.currency(0) + ' para ' + fmt.currency(cur.invest) : 'seguiu em ' + fmt.currency(0));
+      const txtCom = dCom != null
+        ? 'variaram <strong>' + sig(dCom) + '</strong> (' + fmt.num(prev.comprasM) + ' → ' + fmt.num(cur.comprasM) + ')'
+        : (cur.comprasM > 0 ? 'saíram de 0 para ' + fmt.num(cur.comprasM) : 'seguiram em 0');
+      const fato = 'Investimento total ' + txtInv + ' e as compras (pixel Meta) ' + txtCom + '.';
+      let kind = 'nt', hypo = null;
+      if (dInv != null && dCom != null) {
+        if (dInv > 5 && dCom < 0) { kind = 'neg'; hypo = 'fadiga de criativo ou leilão mais caro no período.'; }
+        else if (dInv <= 0 && dCom > 0) { kind = 'pos'; }
+      }
+      cards.push(ecvInsightCard(kind, fato, hypo));
+    }
+    // ROAS por plataforma — ROAS comparado 0,00× (gasto sem receita) não tem
+    // variação %: pctDelta devolve null e isso não pode virar "(0,0%)" verde.
+    const roasCard = (nome, c, p, hypoTxt) => {
+      if (c == null || p == null) return;
+      const d = pctDelta(c, p);
+      if (d == null) {
+        cards.push(c > p
+          ? ecvInsightCard('pos', nome + ' saiu de <strong>' + fmt.roas(p) + '</strong> para <strong>' + fmt.roas(c) + '</strong> (sem % — base zero).', null)
+          : ecvInsightCard('nt', nome + ' seguiu em <strong>' + fmt.roas(c) + '</strong> nos dois períodos (gasto sem receita atribuída).', null));
+        return;
+      }
+      const flat = Math.abs(d) < 0.05;
+      cards.push(ecvInsightCard(flat ? 'nt' : (d > 0 ? 'pos' : 'neg'),
+        nome + ' foi de <strong>' + fmt.roas(p) + '</strong> para <strong>' + fmt.roas(c) + '</strong> (' + sig(d) + ').',
+        d < -15 ? hypoTxt : null));
+    };
+    roasCard('ROAS Meta (pixel)', cur.roasM, prev.roasM, 'mix de campanhas, criativo saturado ou sazonalidade.');
+    if (cur.gOk) roasCard('ROAS Google (atribuição da plataforma)', cur.roasG, prev.roasG, 'termos/produtos do Shopping com pior conversão no período.');
+    // CPA acima do limiar
+    if (cur.cpaM != null && prev.cpaM != null) {
+      const d = pctDelta(cur.cpaM, prev.cpaM);
+      if (d > 20) {
+        cards.push(ecvInsightCard('alerta',
+          'CPA Meta subiu <strong>' + sig(d) + '</strong> — de ' + fmt.currency(prev.cpaM) + ' para ' + fmt.currency(cur.cpaM) + ' (acima do limiar de 20%).',
+          'queda da taxa de conversão pós-clique ou aumento de CPM.'));
+      } else if (d < -20) {
+        cards.push(ecvInsightCard('pos',
+          'CPA Meta caiu <strong>' + sig(d) + '</strong> — de ' + fmt.currency(prev.cpaM) + ' para ' + fmt.currency(cur.cpaM) + '.', null));
+      }
+    }
+  } else if (comp) {
+    // comparação escolhida, mas o período comparado sai da série: sem variações
+    const semDados = comp.cobertura === 'nenhuma';
+    cards.push(ecvInsightCard('nt',
+      'Comparação ' + (semDados ? 'sem dados' : 'parcial') + ': o período comparado (' + fmt.dateFull(comp.a) + ' a ' + fmt.dateFull(comp.b) + ') ' +
+      (semDados ? 'fica inteiro antes' : 'começa antes') + ' do início da série do e-commerce (' + fmt.dateFull(ecomBounds().min) +
+      ') — variações não calculadas para não comparar com dias sem dado.', null));
+  } else {
+    cards.push(ecvInsightCard('nt',
+      'Comparação desativada — os insights de variação aparecem ao escolher uma comparação no topo.', null));
+  }
+
+  // concentração de receita por campanha (por plataforma — nunca somada).
+  // Numerador e denominador da MESMA fonte (campaign_daily) e só com ≥ 2
+  // campanhas ativas: com uma campanha só o card diria sempre "100%".
+  const topShare = (daily, recField, plat) => {
+    const by = aggBy(fdaysR(daily, st.start, st.end), r => r.campanha, ['gasto', recField]);
+    const keys = Object.keys(by).filter(k => by[k].gasto > 0 || by[k][recField] > 0);
+    if (keys.length < 2) return;
+    const tot = keys.reduce((a, k) => a + (by[k][recField] || 0), 0);
+    if (!(tot > 0)) return;
+    let top = null;
+    keys.forEach(k => { if (!top || by[k][recField] > top.v) top = { k, v: by[k][recField] }; });
+    if (top && top.v > 0) {
+      cards.push(ecvInsightCard('nt',
+        'A campanha <strong>' + esc(top.k) + '</strong> concentra <strong>' + fmt.pct(Math.min(100, top.v / tot * 100), 0) +
+        '</strong> da receita atribuída ' + plat + ' no período (' + fmt.currency(top.v) + ' de ' + fmt.currency(tot) +
+        ', entre ' + fmt.num(keys.length) + ' campanhas ativas).', null));
+    }
+  };
+  topShare((DATA.meta_ecom || {}).campaign_daily, 'valor_compras', 'Meta (pixel)');
+  if (cur.gOk) topShare((DATA.google_ecom || {}).campaign_daily, 'valor_conversoes', 'Google');
+
+  // criativos com gasto RELEVANTE e zero venda no período (Meta).
+  // · só roda se o diário por criativo cobre o gasto Meta do período (±5%) —
+  //   sem esse dado, "todos venderam" seria um falso positivo;
+  // · gasto mínimo por criativo = 1 CPA Meta do período (piso R$ 20): centavos
+  //   de entrega residual não viram alerta de "avaliar pausa".
+  const byCreat = aggBy(fdaysR((DATA.meta_ecom || {}).creatives_daily, st.start, st.end),
+    r => r.anuncio + '|||' + r.campanha, ['gasto', 'compras']);
+  const cKeys = Object.keys(byCreat);
+  const gastoCreat = cKeys.reduce((a, k) => a + (byCreat[k].gasto || 0), 0);
+  const cobre = cKeys.length > 0 && cur.gastoM > 0 && Math.abs(gastoCreat - cur.gastoM) <= Math.max(1, cur.gastoM * 0.05);
+  if (cobre) {
+    const minGasto = Math.max(20, cur.cpaM || 0);
+    const regra = 'gasto ≥ ' + fmt.currency(minGasto) + ' no período' + (cur.cpaM != null && cur.cpaM > 20 ? ' (1 CPA Meta)' : ' (piso mínimo)');
+    let semVenda = 0, nSemVenda = 0, nRelevantes = 0;
+    cKeys.forEach(k => {
+      const v = byCreat[k];
+      if (!(v.gasto >= minGasto)) return;
+      nRelevantes++;
+      if (!(v.compras > 0)) { semVenda += v.gasto; nSemVenda++; }
+    });
+    if (nSemVenda > 0) {
+      cards.push(ecvInsightCard('neg',
+        '<strong>' + fmt.currency(semVenda) + '</strong> gastos em ' + fmt.num(nSemVenda) +
+        ' criativo(s) sem nenhuma venda atribuída (pixel Meta) — considerando só criativos com ' + regra + '.',
+        'criativo/oferta sem aderência — avaliar pausa ou troca.'));
+    } else if (nRelevantes > 0) {
+      cards.push(ecvInsightCard('pos', (nRelevantes === 1
+        ? 'O único criativo Meta com ' + regra + ' teve ao menos uma venda atribuída (pixel).'
+        : 'Todos os ' + fmt.num(nRelevantes) + ' criativos Meta com ' + regra + ' tiveram ao menos uma venda atribuída (pixel).'), null));
+    }
+  }
+
+  return cards.length
+    ? '<div class="ins-grid">' + cards.join('') + '</div>'
+    : card('Insights de performance', 'gerados dos dados filtrados', emptyDashed('Sem dados no período para gerar insights.'));
+}
+
+/* ---------- metas de CPA e ROAS da frente (config · 0 = não definida) ----------
+   Régua aplicada POR PLATAFORMA (atribuição própria de cada uma, nunca somada),
+   sobre os números do período filtrado. */
+function ecvMetasHtml(cur, gOk) {
+  const cfg = DATA.config || {};
+  const cpaT = cfg.cpa_target_ecom || 0, roasT = cfg.roas_target_ecom || 0;
+  const linha = (nome, valor, badge) => '<div class="ctx-line">' + nome + ': <strong>' + valor + '</strong> ' + badge + '</div>';
+  const semGoogle = '<div class="ctx-line muted">Google Ads: sem dados nesta frente</div>';
+  const badgeRoas = v => v == null
+    ? '<span class="badge gray">sem gasto</span>'
+    : (v >= roasT ? '<span class="badge green">na meta</span>' : '<span class="badge red">abaixo da meta</span>');
+  const cardCpa = cpaT > 0
+    ? card('Meta de CPA', 'custo por compra (Meta) / por conversão (Google) · período filtrado',
+      '<div class="big-money">' + fmt.currency(cpaT) + '<span class="bm-unit">teto</span></div>' +
+      linha('CPA Meta (pixel)', cur.cpaM == null ? '—' : fmt.currency(cur.cpaM), metaBadgeCusto(cur.cpaM, cpaT)) +
+      (gOk ? linha('Custo/conversão Google', cur.cpaG == null ? '—' : fmt.currency(cur.cpaG), metaBadgeCusto(cur.cpaG, cpaT)) : semGoogle))
+    : card('Meta de CPA', 'custo por compra (Meta) / por conversão (Google)',
+      emptyDashed('Meta de CPA não definida.',
+        'Configure CPA_TARGET_ECOM nas Variables do repositório — o painel passa a marcar o CPA Meta e o custo/conversão Google do período como na meta ou acima dela.'));
+  const cardRoas = roasT > 0
+    ? card('Meta de ROAS', 'retorno atribuído por plataforma — nunca somado · período filtrado',
+      '<div class="big-money">' + fmt.roas(roasT) + '<span class="bm-unit">mínimo</span></div>' +
+      linha('ROAS Meta (pixel)', fmt.roas(cur.roasM), badgeRoas(cur.roasM)) +
+      (gOk ? linha('ROAS Google (atribuição do Google)', fmt.roas(cur.roasG), badgeRoas(cur.roasG)) : semGoogle))
+    : card('Meta de ROAS', 'retorno atribuído por plataforma',
+      emptyDashed('Meta de ROAS não definida.',
+        'Configure ROAS_TARGET_ECOM nas Variables do repositório — o painel passa a marcar o ROAS de cada plataforma (atribuição própria, nunca somada) como na meta ou abaixo dela.'));
+  return '<div class="grid-2">' + cardCpa + cardRoas + '</div>';
+}
+
+/* ---------- página inteira ---------- */
+function renderVisaoEcom(el) {
+  ECV_SPARKS = [];
+  const st = FILTER.ecom;
+  const bd = ecomBounds();
+  const comp = ecomCompareRange();
+  // Comparação só vale com o período comparado INTEIRO dentro da série:
+  // parcial/sem dados → sem variação % (nada de "novo no período" contra
+  // dias que a série não cobre); as linhas tracejadas mostram só dias cobertos.
+  const compOk = !!comp && comp.cobertura === 'total';
+  const compNota = comp && !compOk ? (comp.cobertura === 'nenhuma' ? 'comparação sem dados' : 'comparação parcial · sem %') : null;
+  const cur = ecvTotals(st.start, st.end);
+  const prev = compOk ? ecvTotals(comp.a, comp.b) : null;
+  const dd = ecvDaily(st.start, st.end);
+  const ddPrev = comp && comp.cobertura !== 'nenhuma' ? ecvDaily(comp.a, comp.b) : null;
+  const hasComp = !!comp;
+  const pv = k => prev ? prev[k] : null;
+  const gOk = cur.gOk;
+  const gMotivo = (DATA.google_ecom || {}).motivo || 'Google Ads sem dados para esta frente.';
+
+  let html = '<div class="page-context">Período: <strong>' + periodLabel() + '</strong>' +
+    (st.adjusted ? ' (ajustado ao intervalo com dados: ' + fmt.dateFull(bd.min) + ' a ' + fmt.dateFull(bd.max) + ')' : '') +
+    (comp
+      ? ' · Comparação: ' + fmt.dateFull(comp.a) + ' a ' + fmt.dateFull(comp.b) + ' (' + comp.label + ')' +
+        (compOk ? '' : ' — <strong>' + (comp.cobertura === 'nenhuma' ? 'sem dados' : 'parcial') + '</strong>: a série do e-commerce começa em ' +
+          fmt.dateFull(bd.min) + ', variações não calculadas')
+      : ' · Sem comparação ativa') +
+    ' · "Hoje" = ' + fmt.dateFull(bd.max) + ', último dia com dados do e-commerce · Atualizado em ' +
+    esc(DATA.last_update || '—') + '</div>' + qualityChip('ecom');
+
+  html += banner('blue', '<strong>Atribuição:</strong> compras/receita do <strong>pixel da Meta</strong> e conversões/valor do <strong>Google</strong> são atribuídos por cada plataforma e <strong>não se somam</strong> — o único número agregável é o investimento. Receita real da loja, pedidos e sessões dependem da integração GA4/plataforma da loja (cards preparados).');
+
+  /* ===== 1 · VISÃO EXECUTIVA (negócio + vendas) ===== */
+  html += secTitle('Visão executiva', 'período filtrado' + (hasComp ? ' · variação vs comparação · sparkline = dia a dia' : ''));
+  html += '<div class="xkpis">' +
+    xkpi('Investimento total', fmt.currency(cur.invest),
+      deltaHtml(cur.invest, pv('invest'), 'invest', hasComp, compNota),
+      'Meta ' + fmt.currency(cur.gastoM) + ' + Google ' + (gOk ? fmt.currency(cur.gastoG) : 'sem dados') + ' · único agregável',
+      { vals: dd.investTot, color: P.accentLight }) +
+    xkpi('Compras <span class="xk-tag">pixel Meta</span>', fmt.num(cur.comprasM),
+      deltaHtml(cur.comprasM, pv('comprasM'), 'compras', hasComp, compNota),
+      'atribuição da plataforma', { vals: dd.comprasM, color: S.oliva }) +
+    (gOk
+      ? xkpi('Conversões <span class="xk-tag">Google</span>', fmt.conv(cur.convG),
+        deltaHtml(cur.convG, pv('convG'), 'conversoes', hasComp, compNota),
+        'atribuição da plataforma', { vals: dd.convG, color: GOOGLE_RES })
+      : xkpi('Conversões <span class="xk-tag">Google</span>', null, '', esc(gMotivo))) +
+    xkpi('Receita atribuída <span class="xk-tag">Meta</span>', fmt.currency(cur.recM),
+      deltaHtml(cur.recM, pv('recM'), 'receita', hasComp, compNota),
+      'pixel · não somar com o Google', { vals: dd.recM, color: S.mostarda }) +
+    (gOk
+      ? xkpi('Receita atribuída <span class="xk-tag">Google</span>', fmt.currency(cur.recG),
+        deltaHtml(cur.recG, pv('recG'), 'receita', hasComp, compNota),
+        'atribuição do Google · não somar com a Meta', { vals: dd.recG, color: AMBER_RAMP[1] })
+      : xkpi('Receita atribuída <span class="xk-tag">Google</span>', null, '', esc(gMotivo))) +
+    xkpi('ROAS <span class="xk-tag">Meta</span>', cur.roasM == null ? null : fmt.roas(cur.roasM),
+      deltaHtml(cur.roasM, pv('roasM'), 'roas', hasComp, compNota),
+      'receita pixel ÷ gasto Meta', { vals: dd.roasM, color: S.mostarda }) +
+    (gOk
+      ? xkpi('ROAS <span class="xk-tag">Google</span>', cur.roasG == null ? null : fmt.roas(cur.roasG),
+        deltaHtml(cur.roasG, pv('roasG'), 'roas', hasComp, compNota),
+        'valor conv. ÷ gasto Google', { vals: dd.roasG, color: GOOGLE_RES })
+      : xkpi('ROAS <span class="xk-tag">Google</span>', null, '', esc(gMotivo))) +
+    xkpi('CPA <span class="xk-tag">Meta</span>', cur.cpaM == null ? null : fmt.currency(cur.cpaM),
+      deltaHtml(cur.cpaM, pv('cpaM'), 'cpa', hasComp, compNota),
+      'gasto ÷ compras (pixel)', { vals: dd.cpaM, color: S.terracota }) +
+    (gOk
+      ? xkpi('Custo/conversão <span class="xk-tag">Google</span>', cur.cpaG == null ? null : fmt.currency(cur.cpaG),
+        deltaHtml(cur.cpaG, pv('cpaG'), 'cpa', hasComp, compNota),
+        'gasto ÷ conversões', { vals: dd.cpaG, color: GOOGLE_INV })
+      : xkpi('Custo/conversão <span class="xk-tag">Google</span>', null, '', esc(gMotivo))) +
+    xkpi('Cliques no link <span class="xk-tag">Meta</span>', fmt.num(cur.cliM),
+      deltaHtml(cur.cliM, pv('cliM'), 'cliques', hasComp, compNota),
+      gOk ? 'Google: ' + fmt.num(cur.cliG) + ' cliques (totais)' : 'link clicks das campanhas [ECOMMERCE]',
+      { vals: dd.cliM, color: P.soft }) +
+    xkpi('CTR <span class="xk-tag">Meta</span>', cur.ctrM == null ? null : fmt.pct(cur.ctrM, 2),
+      deltaHtml(cur.ctrM, pv('ctrM'), 'ctr', hasComp, compNota),
+      'cliques no link ÷ impressões' + (cur.ctrG == null ? '' : ' · Google: ' + fmt.pct(cur.ctrG, 2)), null) +
+    '</div>';
+
+  html += '<div class="xkpis prep-row">' +
+    xkpiPrep('Receita da loja', 'soma dos pedidos pagos no período', 'plataforma da loja') +
+    xkpiPrep('Pedidos', 'nº de pedidos da loja no período', 'plataforma da loja') +
+    xkpiPrep('Ticket médio', 'receita da loja ÷ pedidos', 'plataforma da loja') +
+    xkpiPrep('Taxa de conversão', 'pedidos ÷ sessões × 100', 'GA4 + plataforma da loja') +
+    xkpiPrep('Sessões', 'visitas ao site no período', 'GA4') +
+    xkpiPrep('MER', 'receita da loja ÷ investimento total em mídia', 'plataforma da loja') +
+    xkpiPrep('CAC', 'investimento ÷ novos clientes', 'plataforma da loja (novos clientes)') +
+    '</div>' +
+    '<div class="note">Cards preparados: ficam sem número até a loja/GA4 enviarem dados reais — nada é simulado. ' +
+    '<strong>MER</strong> e <strong>CAC</strong> não são calculáveis com atribuição de plataforma: exigem a receita real da loja e a contagem de novos clientes.</div>';
+
+  /* ===== 2 · EVOLUÇÃO ===== */
+  html += secTitle('Evolução', 'dia a dia do período · tracejado cinza = período comparado');
+  const EVO_OPTS = [['invest', 'Investimento'], ['compras', 'Compras'], ['receita', 'Receita atribuída'], ['roas', 'ROAS'], ['cpa', 'CPA']];
+  html += card(null, null,
+    '<div class="seg-toggle" id="evo-toggle">' + EVO_OPTS.map(o =>
+      '<button type="button" data-v="' + o[0] + '" class="' + (ECOM_EVO_METRIC === o[0] ? 'on' : '') + '">' + o[1] + '</button>').join('') +
+    '</div>' +
+    '<div class="chart-box tall"><canvas id="ch-ecv-evo"></canvas></div>' +
+    '<div class="note">Sempre por plataforma: compras = pixel Meta · conversões = Google · receitas exibidas separadas (atribuição de cada plataforma — nunca somadas). ' +
+    'Com comparação ativa, as linhas tracejadas neutras mostram a mesma métrica no período comparado, alinhada dia a dia (tooltip mostra a data original).</div>');
+
+  /* ===== 3 · AQUISIÇÃO POR CANAL ===== */
+  html += secTitle('Aquisição por canal', 'mídia paga hoje · demais canais dependem do GA4');
+  const aqBody =
+    '<tr><td class="name">Meta Ads<div class="ch-sub">compras e receita: pixel da Meta</div></td>' +
+    tdNum(cur.gastoM, fmt.currency) +
+    tdNum(cur.cliM, fmt.num) +
+    tdNum(cur.comprasM, fmt.num) +
+    tdNum(cur.recM, fmt.currency) +
+    tdNum(cur.cpaM, fmt.currency) +
+    tdNum(cur.roasM, fmt.roas) + '</tr>' +
+    (gOk
+      ? '<tr><td class="name">Google Ads<div class="ch-sub">conversões e valor: atribuição do Google · cliques totais</div></td>' +
+      tdNum(cur.gastoG, fmt.currency) +
+      tdNum(cur.cliG, fmt.num) +
+      tdNum(cur.convG, fmt.conv) +
+      tdNum(cur.recG, fmt.currency) +
+      tdNum(cur.cpaG, fmt.currency) +
+      tdNum(cur.roasG, fmt.roas) + '</tr>'
+      : '<tr><td class="name">Google Ads</td><td colspan="6" class="dim">' + esc(gMotivo) + '</td></tr>') +
+    ['Orgânico', 'Direto', 'E-mail', 'Referral'].map(c2 =>
+      '<tr class="row-prep"><td class="name">' + c2 + '</td>' +
+      '<td colspan="6"><span class="dep-tag">depende de GA4</span></td></tr>').join('');
+  html += card('Canais de aquisição', 'clique no cabeçalho para ordenar · período filtrado',
+    sortableWrap([
+      { t: 'Canal', k: 'txt' }, { t: 'Investimento', r: 1, k: 'num' }, { t: 'Cliques', r: 1, k: 'num' },
+      { t: 'Compras/Conversões', r: 1, k: 'num' }, { t: 'Receita atribuída', r: 1, k: 'num' },
+      { t: 'CPA', r: 1, k: 'num' }, { t: 'ROAS', r: 1, k: 'num' }
+    ], aqBody) +
+    '<div class="note"><strong>Atribuição:</strong> cada linha usa a atribuição da própria plataforma — as receitas <strong>não são somáveis</strong> entre linhas. ' +
+    'Cliques: Meta = cliques no link; Google = cliques totais. Orgânico, Direto, E-mail e Referral entram quando o GA4 for integrado.</div>');
+
+  /* ===== 4 · FUNIL DO E-COMMERCE (preparado) ===== */
+  html += secTitle('Funil do e-commerce', 'estado preparado — eventos vêm do GA4');
+  const fpStages = ['Sessões', 'Visualização de produto', 'Carrinho', 'Checkout', 'Compra'];
+  const fpW = [100, 78, 56, 38, 22];
+  html += card('Funil da loja', 'Sessões → Produto → Carrinho → Checkout → Compra',
+    '<div class="funnel-prep">' + fpStages.map((s2, i) =>
+      '<div class="fp-row"><div class="fp-lb">' + s2 + '</div>' +
+      '<div class="fp-track"><div class="fp-bar" style="width:' + fpW[i] + '%"></div></div>' +
+      '<div class="fp-pct">—</div></div>').join('') + '</div>' +
+    '<div class="note">Sem números: os eventos do funil vêm do <strong>GA4 — integração pendente</strong>. O desenho acima é só a estrutura; nada é simulado.</div>');
+
+  /* ===== 5 · ANÁLISES DA LOJA (preparadas) ===== */
+  html += secTitle('Análises da loja', 'estado preparado — cada card nomeia o dado que falta');
+  const prepCards = [
+    ['Produtos', 'mais vendidos · receita por produto/categoria', 'plataforma da loja (itens dos pedidos)'],
+    ['Clientes: novos × recorrentes', 'participação e receita por tipo de cliente', 'plataforma da loja (histórico de clientes)'],
+    ['Geografia de vendas', 'pedidos e receita por estado/cidade', 'plataforma da loja (endereço dos pedidos)'],
+    ['Dispositivos', 'sessões e conversão por dispositivo', 'GA4'],
+    ['Dias e horários', 'pedidos por dia da semana e hora', 'plataforma da loja (data/hora dos pedidos)'],
+    ['Cancelamentos e reembolsos', 'volume, valor e motivos', 'plataforma da loja'],
+    ['Receita bruta × líquida', 'descontos, fretes, impostos e reembolsos', 'plataforma da loja'],
+    ['Cupons', 'uso e receita por cupom', 'plataforma da loja (promoções)']
+  ];
+  html += '<div class="prep-grid">' + prepCards.map(p2 =>
+    '<div class="prep-card"><div class="pc-t">' + p2[0] + '</div><div class="pc-d">' + p2[1] + '</div>' +
+    '<div class="xk-dep">depende de: ' + p2[2] + '</div></div>').join('') + '</div>';
+  html += '<div class="note">Os breakdowns de idade, região e posicionamento existentes hoje são de <strong>anúncio</strong> (mídia), não de venda — ' +
+    '<a href="#ecom/publico">ver o perfil de quem responde aos anúncios na página Público</a>.</div>';
+
+  /* ===== 6 · MÍDIA PAGA (tabela unificada) ===== */
+  html += secTitle('Mídia paga', 'campanhas das duas plataformas · período filtrado');
+  const mRows = [];
+  const stM = dict((DATA.meta_ecom || {}).campaign_status);
+  const byMC = aggBy(fdaysR((DATA.meta_ecom || {}).campaign_daily, st.start, st.end),
+    r => r.campanha, ['gasto', 'impressoes', 'cliques_link', 'compras', 'valor_compras']);
+  Object.keys(byMC).forEach(k => {
+    const v = byMC[k];
+    if (!(v.gasto > 0 || v.compras > 0)) return;
+    mRows.push({ nome: k, plat: 'Meta', status: statusBadge(stM[k]), gasto: v.gasto, imp: v.impressoes, cli: v.cliques_link, res: v.compras, rec: v.valor_compras });
+  });
+  if (gOk) {
+    const stG = dict((DATA.google_ecom || {}).campaign_status);
+    const byGC = aggBy(fdaysR((DATA.google_ecom || {}).campaign_daily, st.start, st.end),
+      r => r.campanha, ['gasto', 'impressoes', 'cliques', 'conversoes', 'valor_conversoes']);
+    Object.keys(byGC).forEach(k => {
+      const v = byGC[k];
+      if (!(v.gasto > 0 || v.conversoes > 0)) return;
+      mRows.push({ nome: k, plat: 'Google', status: googleStatusBadge(stG[k]), gasto: v.gasto, imp: v.impressoes, cli: v.cliques, res: v.conversoes, rec: v.valor_conversoes });
+    });
+  }
+  mRows.sort((a, b) => b.gasto - a.gasto);
+  const mBody = mRows.map(r => {
+    const rctr = r.imp > 0 ? r.cli / r.imp * 100 : null;
+    const rcpc = r.cli > 0 ? r.gasto / r.cli : null;
+    const rcpa = r.res > 0 ? r.gasto / r.res : null;
+    const rroas = r.gasto > 0 ? r.rec / r.gasto : null;
+    const alerta = r.gasto > 0 && !(r.res > 0);
+    return '<tr' + (alerta ? ' class="row-alert" title="gasto sem venda/conversão atribuída no período"' : '') + '>' +
+      '<td class="name">' + esc(r.nome) + '</td>' +
+      '<td class="peri">' + r.plat + '</td>' +
+      '<td>' + r.status + '</td>' +
+      tdNum(r.gasto, fmt.currency) +
+      tdNum(r.imp, fmt.num) +
+      tdNum(r.cli, fmt.num) +
+      tdNum(rctr, v => fmt.pct(v, 2)) +
+      tdNum(rcpc, fmt.currency) +
+      tdNum(r.res, fmt.conv) +
+      tdNum(r.rec, fmt.currency) +
+      tdNum(rcpa, fmt.currency) +
+      tdNum(rroas, fmt.roas) + '</tr>';
+  }).join('');
+  html += card('Campanhas — Meta + Google', 'clique no cabeçalho para ordenar · linha tingida = gasto sem venda/conversão no período',
+    mBody
+      ? sortableWrap([
+        { t: 'Campanha', k: 'txt' }, { t: 'Plataforma', k: 'txt' }, { t: 'Status' },
+        { t: 'Investimento', r: 1, k: 'num' }, { t: 'Impressões', r: 1, k: 'num' },
+        { t: 'Cliques-link/Cliques', r: 1, k: 'num' }, { t: 'CTR', r: 1, k: 'num' },
+        { t: 'CPC', r: 1, k: 'num' }, { t: 'Compras/Conv.', r: 1, k: 'num' },
+        { t: 'Receita atrib.', r: 1, k: 'num' }, { t: 'CPA', r: 1, k: 'num' }, { t: 'ROAS', r: 1, k: 'num' }
+      ], mBody) +
+      '<div class="note">Cliques: Meta = cliques no link · Google = cliques totais. Compras/receita Meta = pixel; conversões/valor Google = atribuição da plataforma — colunas de receita <strong>não somáveis</strong> entre plataformas. ' +
+      'Detalhe por conjunto e criativo nas páginas <a href="#ecom/meta">Meta Ads</a> e <a href="#ecom/google">Google Ads</a>.</div>'
+      : emptyDashed('Nenhuma campanha com gasto no período.', 'Ajuste o filtro de período no topo.'));
+
+  /* ===== 6b · CONTROLE DE INVESTIMENTO, METAS, RESULTADO E HISTÓRICO =====
+     Conteúdo do dashboard de otimização da frente (otimizacao_ecom + config)
+     que a central não pode perder: ciclo × orçamento, metas de CPA/ROAS,
+     criativos eficientes × dinheiro sem retorno, alertas e histórico mensal. */
+  const oc = otCfg('ecom');
+  html += secTitle('Controle de investimento e metas', 'ciclo do mês × orçamento · independe do filtro · metas sobre o período filtrado');
+  html += otCicloHtml(oc);
+  html += ecvMetasHtml(cur, gOk);
+  html += secTitle('Onde está o resultado', 'e onde o dinheiro está parado · toda a série');
+  html += otResultadoHtml(oc);
+  html += '<div class="note grid-note">No e-commerce, <strong>resultado</strong> = compra atribuída pelo pixel da Meta; ' +
+    '"zero resultado" = anúncio com mais de R$ 10 gastos sem compra nem conversa iniciada. Só Meta: o Google não expõe criativos.</div>';
+  html += secTitle('Qual ação tomar', 'alertas priorizados por dinheiro em jogo');
+  html += otAcoesHtml(oc);
+  html += secTitle('Histórico mensal', 'mês a mês por plataforma — independe do filtro');
+  html += otHistHtml(oc);
+
+  /* ===== 7 · TABELA EXECUTIVA DIÁRIA ===== */
+  html += secTitle('Tabela executiva diária', 'uma linha por dia do período · busca, ordenação, paginação e CSV');
+  html += card(null, null,
+    '<div class="dt-bar">' +
+    '<input type="text" id="dt-q" placeholder="Buscar data (dd/mm/aaaa)" autocomplete="off">' +
+    '<button type="button" id="dt-csv" class="btn-sec">Exportar CSV</button>' +
+    '</div>' +
+    '<div id="dt-table"></div>' +
+    '<div class="dt-pag" id="dt-pag"></div>' +
+    '<div class="note">Receitas atribuídas por cada plataforma — as colunas Meta e Google <strong>não se somam</strong>. ' +
+    (gOk ? '' : 'Google Ads sem dados: colunas do Google em "—" e investimento total = só Meta. ') +
+    'CSV no padrão do Excel em português: separador ponto e vírgula, decimais com vírgula e datas em dd/mm/aaaa (documentado no cabeçalho do arquivo).</div>');
+
+  /* ===== 8 · INSIGHTS (diagnósticos) ===== */
+  html += secTitle('Insights de performance', 'calculados dos dados filtrados' + (compOk ? ' vs comparação' : '') + ' — sem IA, sem especulação');
+  html += ecvInsights(cur, prev, st, comp);
+
+  el.innerHTML = html;
+
+  /* ---------- pós-render ---------- */
+  drawSparks();
+  wireSparkResize(el.querySelector('.xkpis'));
+  ecvEvoChart(dd, ddPrev);
+  wireSortables(el);
+  ecvDailyTable(dd);
+  // Troca de métrica redesenha SÓ o gráfico: busca, ordenação e página da
+  // tabela diária (e das tabelas ordenáveis) ficam como o usuário deixou.
+  const tg = document.getElementById('evo-toggle');
+  if (tg) tg.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => {
+      if (ECOM_EVO_METRIC === b.dataset.v) return;
+      ECOM_EVO_METRIC = b.dataset.v;
+      tg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      ecvEvoChart(dd, ddPrev);
+    });
+  });
+}
 
 function otLegadoEcom() {
   const me = DATA.meta_ecom || {};
@@ -2964,7 +3974,8 @@ function startDashboard() {
   document.getElementById('stamp').textContent = 'atualizado em ' + (DATA.last_update || '—');
 
   buildFilterUI();
-  setPreset('all', false);
+  setPresetEcom('30', false);          // estado inicial da frente e-commerce
+  setPreset('all', false);             // estado inicial B2B (comportamento original)
 
   document.getElementById('loading').hidden = true;
 
