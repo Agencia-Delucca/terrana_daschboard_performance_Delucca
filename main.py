@@ -1,10 +1,17 @@
 """Orquestrador da coleta — grava dados brutos em data_raw/*.json.
 
-Ordem: Kommo (CRM, fonte de verdade) → Meta Ads → Google Ads.
-Depois rodar scripts/generate_dashboard_data.py (ETL → summary.json).
+Ordem: Meta Ads → Kommo (CRM, fonte de verdade) → planilha do formulário →
+Google Ads. A Meta vem primeiro porque é a única fonte com hora marcada: o
+app é da agência inteira e este dashboard só chama a API das 03:10 às 03:59
+(Brasília). Fora disso, ou sem META_COLETA=sim, o coletor não chama a Meta e
+usa o último dado em cache. Depois rodar scripts/generate_dashboard_data.py.
 
 Falha de fonte essencial = exit 1 com ::error:: (regra de ouro 7):
 workflow verde precisa significar dado íntegro.
+
+Uso:
+  python main.py             tudo (a Meta respeita a grade)
+  python main.py --sem-meta  pula a Meta; o workflow a roda num passo próprio antes
 """
 import json
 import os
@@ -33,6 +40,10 @@ def main():
         print(f"::error::Secrets essenciais ausentes: {', '.join(faltando)}")
         sys.exit(1)
 
+    if "--sem-meta" not in sys.argv:
+        print("Meta Ads...")
+        meta_ads_api.coletar()
+
     print("Kommo (CRM)...")
     client = kommo.KommoClient()
     statuses, users = kommo.get_structure(client)
@@ -48,17 +59,13 @@ def main():
     print("Planilha do formulário...")
     salvar("form_sheet", form_sheet.get_leads_formulario())
 
-    print("Meta Ads...")
-    meta_rows = meta_ads_api.get_ad_insights_daily()
-    if not meta_rows:
-        sys.exit(1)
-    salvar("meta_ads", meta_rows)
-    salvar("meta_status", meta_ads_api.get_campaign_status())
-    salvar("meta_breakdowns", meta_ads_api.get_insights_breakdowns())
-
     print("Google Ads...")
     salvar("google_ads", google_ads.get_campaign_daily())
     salvar("google_status", google_ads.get_campaign_status())
+
+    if not meta_ads_api.carregar_cache()["linhas"]:
+        print("::error::Sem dados da Meta — nem coletados agora nem em cache.")
+        sys.exit(1)
 
     print(f"Coleta concluída — brutos em {config.RAW_DIR}/")
 

@@ -1,20 +1,34 @@
 name: Deploy Dashboard (GitHub Pages)
 
 # Hospedagem OFICIAL do dashboard (decisão de 05/08/2026 — Netlify saiu
-# do projeto). Coleta os dados na hora e publica o front COM os dados
-# embutidos — modelo sem login desta fase. Quando o Supabase entrar, o
-# passo condicional abaixo remove os dados do artefato automaticamente.
+# do projeto). Coleta os dados e publica o front COM os dados embutidos —
+# modelo sem login desta fase. Quando o Supabase entrar, o passo
+# condicional abaixo remove os dados do artefato automaticamente.
+#
+# GRADE DA META (ver README): o app da Meta é da agência inteira e cada
+# dashboard só coleta na sua hora. Este: 03:10–03:59 em Brasília
+# (06:10–06:59 UTC). Só a execução agendada chama a Meta; pushes e
+# execuções manuais publicam com o último dado da Meta guardado em cache.
+# O próprio coletor recusa chamadas fora da janela.
 
 on:
   push:
     branches: [main]
     paths: ["dashboard/**", ".github/workflows/deploy_pages.yml"]
   schedule:
-    # 1x/dia às 06:00 BRT (09:00 UTC) — decisão da gestora para economizar
-    # o limite de deploys quando a Netlify voltar. O GitHub pode atrasar
-    # alguns minutos o cron; o site publica "por volta das 6h".
-    - cron: "0 9 * * *"
+    # 03:10 em Brasília = 06:10 UTC. Nunca no minuto 0: o GitHub atrasa e,
+    # sob carga, descarta agendamentos marcados na hora cheia.
+    - cron: "10 6 * * *"
   workflow_dispatch:
+    inputs:
+      coletar_meta:
+        description: "Chamar a Meta? Só funciona das 03:10 às 03:59 (Brasília); fora disso o coletor ignora"
+        type: boolean
+        default: false
+      janela_comercial:
+        description: "Liberar a Meta das 09:10 às 18:59 (Brasília) — só com combinado prévio com a agência"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,12 +37,15 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # nunca cancelar a coleta da madrugada no meio por causa de um push
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A Meta para sozinha às 03:59 (o coletor olha o relógio). Depois dela
+    # vêm Kommo, planilha, Google, ETL e deploy, que não usam o app da Meta.
+    timeout-minutes: 60
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -52,7 +69,52 @@ jobs:
             exit 1
           fi
 
-      - name: Coleta + ETL (dados frescos a cada publicação)
+      # Só o dado da Meta vai para o cache (métricas de anúncio, sem dado
+      # pessoal). Kommo e planilha são coletados de novo em toda execução.
+      - name: Restaurar último dado da Meta
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data_raw/meta_ads.json
+            data_raw/meta_status.json
+            data_raw/meta_breakdowns.json
+            data_raw/meta_creatives.json
+            data_raw/meta_campaigns.json
+            data_raw/meta_coleta_estado.json
+          key: meta-raw-${{ github.run_id }}
+          restore-keys: meta-raw-
+
+      - name: Coleta da Meta (só na janela 03:10–03:59)
+        id: meta
+        timeout-minutes: 50
+        env:
+          META_COLETA: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.coletar_meta)) && 'sim' || 'nao' }}
+          META_JANELA_COMERCIAL: ${{ (github.event_name == 'workflow_dispatch' && inputs.janela_comercial) && 'sim' || 'nao' }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+        run: python -u -m collectors.meta_ads_api
+
+      - name: Guardar dado da Meta
+        if: always() && steps.meta.outputs.chamou_meta == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data_raw/meta_ads.json
+            data_raw/meta_status.json
+            data_raw/meta_breakdowns.json
+            data_raw/meta_creatives.json
+            data_raw/meta_campaigns.json
+            data_raw/meta_coleta_estado.json
+          key: meta-raw-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Sem histórico completo da Meta não publica: o site fica na última
+      # versão boa em vez de mostrar meses faltando.
+      - name: Conferir dado da Meta
+        id: pronto
+        run: python -u -m collectors.meta_ads_api --verificar
+
+      - name: Coleta das demais fontes + ETL
+        if: steps.pronto.outputs.pronto == 'true'
         env:
           KOMMO_SUBDOMAIN: ${{ secrets.KOMMO_SUBDOMAIN }}
           KOMMO_TOKEN: ${{ secrets.KOMMO_TOKEN }}
@@ -79,13 +141,14 @@ jobs:
           ORCAMENTO_GOOGLE_B2B: ${{ vars.ORCAMENTO_GOOGLE_B2B }}
           ORCAMENTO_META_INST: ${{ vars.ORCAMENTO_META_INST }}
         run: |
-          python -u main.py
+          python -u main.py --sem-meta
           python -u scripts/generate_dashboard_data.py
 
       # Com Supabase configurado o dado oficial vive no bucket PRIVADO e o
       # site publicado não carrega nenhum dado (o front baixa após login).
       # Sem Supabase (fase-ponte), o dado vai embutido — modelo sem senha.
       - name: Modo autenticado — remover dados do artefato
+        if: steps.pronto.outputs.pronto == 'true'
         env:
           TEM_SUPABASE: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
@@ -96,9 +159,11 @@ jobs:
             echo "Fase-ponte sem Supabase: dados seguem embutidos no site."
           fi
 
-      - uses: actions/upload-pages-artifact@v3
+      - if: steps.pronto.outputs.pronto == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: dashboard/
 
       - id: deployment
+        if: steps.pronto.outputs.pronto == 'true'
         uses: actions/deploy-pages@v4

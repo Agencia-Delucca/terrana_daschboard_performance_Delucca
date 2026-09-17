@@ -24,6 +24,14 @@ META_API_VERSION = os.getenv("META_API_VERSION", "v21.0")
 # Desde quando coletar insights (a conta começou a rodar mídia em 2026).
 META_SINCE = os.getenv("META_SINCE", "2026-01-01")
 
+# Grade da Meta (ver README): o app é da agência inteira e este dashboard só
+# chama a API das 03:10 às 03:59 em Brasília. A chamada só acontece com
+# META_COLETA=sim — o workflow liga isso na execução agendada; localmente e
+# em pushes fica desligado e o dado vem do cache. META_JANELA_COMERCIAL=sim
+# libera 09:10–18:59, só com combinado prévio com a agência.
+META_COLETA = os.getenv("META_COLETA", "nao").strip().lower()
+META_JANELA_COMERCIAL = os.getenv("META_JANELA_COMERCIAL", "nao").strip().lower()
+
 # --- Google Ads (aguardando credenciais OAuth da agência) ---------------
 GOOGLE_ADS_DEVELOPER_TOKEN = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
 GOOGLE_ADS_CLIENT_ID = os.getenv("GOOGLE_ADS_CLIENT_ID", "")
