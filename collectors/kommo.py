@@ -9,6 +9,7 @@ devolve 403 com bloqueio de IP se insistir — o cliente segura em 5 req/s e
 pagina de 50 em 50 (acima disso a API devolve 504).
 """
 import time
+import unicodedata
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -179,12 +180,18 @@ def _contato_principal(lead):
     return contatos[0]["id"] if contatos else None
 
 
+def _sem_acento(texto):
+    t = unicodedata.normalize("NFKD", texto or "")
+    return t.encode("ascii", "ignore").decode().strip().lower()
+
+
 def get_contacts(client):
-    """{contact_id: {nome, telefone, email}} — chave do matching com a
-    planilha do formulário (telefone/e-mail ficam em custom fields)."""
+    """{contact_id: {nome, telefone, email, tipo_negocio}} — telefone/e-mail
+    casam com a planilha do formulário; "Tipo de Negócio" é a resposta do
+    formulário que a integração da Meta grava no contato."""
     out = {}
     for c in client.paginate("contacts", {"with": "leads"}):
-        telefone = email = ""
+        telefone = email = tipo = ""
         for f in c.get("custom_fields_values") or []:
             code = (f.get("field_code") or "").upper()
             valores = f.get("values") or []
@@ -192,9 +199,11 @@ def get_contacts(client):
                 telefone = str(valores[0].get("value") or "")
             elif code == "EMAIL" and valores:
                 email = str(valores[0].get("value") or "").lower()
-        out[c["id"]] = {"nome": c.get("name", ""),
-                        "telefone": telefone, "email": email}
-    print(f"  Kommo: {len(out)} contatos (telefone/e-mail)")
+            elif _sem_acento(f.get("field_name")) == "tipo de negocio" and valores:
+                tipo = str(valores[0].get("value") or "").strip()
+        out[c["id"]] = {"nome": c.get("name", ""), "telefone": telefone,
+                        "email": email, "tipo_negocio": tipo}
+    print(f"  Kommo: {len(out)} contatos (telefone/e-mail/tipo de negócio)")
     return out
 
 
@@ -278,6 +287,8 @@ def get_events(client, days=None):
                 "id": ev["id"],
                 "type": ev.get("type", ""),
                 "entity_id": ev.get("entity_id"),
+                # lead ou contato — mensagem pode cair no contato sem lead aberto
+                "entity_type": ev.get("entity_type"),
                 "talk_id": talk_id,
                 "status_before": status_before,
                 "status_after": status_after,

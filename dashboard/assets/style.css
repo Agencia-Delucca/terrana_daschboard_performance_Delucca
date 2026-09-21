@@ -488,7 +488,7 @@ body.mode-select #selector {
   .cols-hero-6 .kpi.hero { grid-column: span 3; }
 }
 @media (max-width: 1100px) {
-  .grid-2 { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: minmax(0, 1fr); }   /* minmax: tabela larga rola no card, não estica a página */
 }
 @media (max-width: 900px) {
   #sidebar { position: static; width: auto; height: auto; border-right: none; border-bottom: 1px solid var(--border-card); }
@@ -561,7 +561,19 @@ body.mode-select #selector {
 }
 .q-chip:hover { color: #FBBF24; border-color: #8A5C12; text-decoration: none; }
 /* títulos de seção */
-.sec-title { font-size: 16.5px; font-weight: 800; letter-spacing: -.01em; margin: 34px 0 14px; }
+.sec-title { font-size: 16.5px; font-weight: 800; letter-spacing: -.01em; margin: 34px 0 14px; scroll-margin-top: 80px; }
+/* atalhos para as seções (Visão Geral B2B) */
+.sec-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; }
+.sec-nav button {
+  background: var(--bg-card); border: 1px solid var(--border-card); color: var(--text-soft);
+  font-family: inherit; font-size: 11.5px; font-weight: 600;
+  padding: 6px 12px; border-radius: 999px; cursor: pointer;
+}
+.sec-nav button:hover, .sec-nav button:focus-visible { border-color: var(--blue); color: var(--text); outline: none; }
+.sub-sec { font-size: 13px; font-weight: 700; color: var(--text-soft); margin: 4px 0 10px; }
+/* leitura em tópicos (Atendimento dos leads · "Quanto dá para melhorar") */
+.lista-leitura { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; line-height: 1.55; color: var(--text-soft); }
+.lista-leitura strong { color: var(--text); }
 .sec-title span { color: var(--text-muted); font-weight: 600; font-size: 12.5px; margin-left: 4px; }
 /* grid de 3 colunas */
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 28px; }
@@ -642,7 +654,7 @@ body.mode-select #selector {
 .q-do strong { color: var(--text-soft); }
 /* responsivo do dashboard de otimização */
 @media (max-width: 1200px) {
-  .grid-3 { grid-template-columns: 1fr; }
+  .grid-3 { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 760px) {
   .pb-kpis { gap: 18px; }

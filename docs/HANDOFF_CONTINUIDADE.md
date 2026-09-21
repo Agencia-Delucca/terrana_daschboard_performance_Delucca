@@ -25,7 +25,7 @@ precisar do histórico de conversa anterior.
 | **Estado atual** | Em produção, **fase-ponte**: dados embutidos no site público, **sem login**. Custo de infra R$ 0. O código de login (Supabase Auth + bucket privado) está escrito nas duas pontas e desligado por constantes vazias. |
 | **Meta: já destravou** | A coleta da Meta **voltou a rodar em 18/09/2026 03:10 BRT**, no primeiro disparo do cron novo. O summary publicado (18/09 03:39) traz `totals.meta_rows = 1.067` e séries da Meta até **2026-09-18**; o gate `--verificar` devolveu `pronto=true` e o Pages republicou. |
 | **A cópia local está atrasada** | `data_raw/meta_*.json` param em **10/09** e `meta_coleta_estado.json` está vazio **porque o cache incremental da Meta vive no `actions/cache` do runner, não nesta máquina** (§10.6). Isso **não** é sinal de coleta parada. Antes de investigar qualquer coisa, baixe `data/summary.json` do site e compare (§11). |
-| **Pendência nº 1** | **A planilha do formulário**, essa sim, continua parada: o summary no ar ainda traz `planilha_total = 444` e último envio em **25/08/2026**. É ela que dá a atribuição por criativo. Ver §14.1. |
+| **Pendência nº 1** | **A planilha do formulário**, essa sim, continua parada: o summary no ar ainda traz `planilha_total = 444` e último envio em **25/08/2026**. É ela que dá a atribuição por criativo. Ver §14.1. **Paliativo desde 21/09:** o lead do formulário é reconhecido pela tag `metaform`/`fb<id>` do Kommo (`lead_do_formulario`) e entra como pago Meta, casado com a campanha B2B do dia quando há uma só — o CPL (CRM) voltou a ficar certo (antes setembro tinha 6 leads pagos e CPL ~R$ 120). Criativo continua dependendo da planilha. |
 | **Riscos que quebram o cliente** | Chamar a Meta fora da janela 03:10–03:59 BRT (derruba a coleta de outros clientes da agência); somar receita Meta + Google; deixar nome/telefone de lead sair por qualquer canal (site, artifact, print, anexo); inventar número onde o dado não existe. Ver §3. |
 
 ---
@@ -119,8 +119,13 @@ O `gh` CLI **não está instalado** nesta máquina; use a interface web do GitHu
 
 ```bash
 set PYTHONUTF8=1
-python -m unittest discover -s tests -t .        # 24 testes: 16 do coletor da Meta + 8 da origem por DDD, sem rede
+python -m unittest discover -s tests -t .        # 33 testes: 16 do coletor da Meta + 8 da origem por DDD + 9 do atendimento, sem rede
 ```
+
+`tests/test_atendimento.py` (9 testes) cobre a autoria por tempo (robô, agente de
+IA só na janela), as situações E/P/R/N/F, tempos, tentativas, janela de 24 h, tipo
+de negócio, a lista nominal só com login e a atribuição pela tag do formulário
+(inclusive: duas campanhas B2B no mesmo dia → não chuta).
 
 `tests/test_regioes.py` (8 testes) cobre a tabela de DDDs, os formatos de telefone
 (com/sem 55, 0 de longa distância, exterior, inválido) e a agregação `crm_regiao`
@@ -276,6 +281,7 @@ quando a publicação for autenticada.
 | `tests/test_meta_coleta.py` (348 l.) | 16 testes do coletor da Meta, sem tocar na API |
 | `regioes_br.py` | Tabela dos 67 DDDs → UF, cidade-polo e área; nome e região de cada UF; `localizar(telefone)` |
 | `tests/test_regioes.py` | 8 testes da origem geográfica (DDD → estado) e da agregação `crm_regiao` |
+| `tests/test_atendimento.py` | 9 testes do atendimento dos leads e da atribuição pela tag do formulário |
 | `.github/workflows/deploy_pages.yml` (169 l.) | **Único** workflow: coleta + ETL + deploy |
 | `requirements.txt` | `requests`, `python-dotenv`, `supabase`, `google-auth` |
 | `.env.example` | Nomes das variáveis (sem valores). **Defasado**: faltam `GOOGLE_SA_JSON` e os cinco `ORCAMENTO_*` que existem no `.env` real |
@@ -553,6 +559,7 @@ etapa desconhecida → 900, vai para o fim).
 | `institucional` | dict(3) ou `null` | `aggregate_institucional` (748) | `split_gasto` (todas as frentes), `monthly`, `campaigns` (com thumbnail/permalink do anúncio de maior gasto) |
 | `publico` | dict(4) | `aggregate_publico` (799) | `disponivel, age_gender, placement, region` — cada linha com `frente` |
 | `qualidade_responsavel` | **list** | (818) | Única chave de topo que é lista |
+| `atendimento_leads` | dict(12) | `aggregate_atendimento_leads` | **Uma linha por lead, sem dado pessoal** (`colunas` + `linhas` em lista, ~140 KB): dia, situação da conversa (E = lead escreveu por último · P = equipe falou por último · R = só o robô · N = sem mensagem · F = fechado), canal (f/d), etapa/tipo/responsável (índices em `etapas`/`tipos`/`responsaveis`), horas até o 1º contato humano, horas até a 1ª resposta humana desde a 1ª msg do lead, se continuou, se escreveu, tentativas depois do silêncio do lead, horas na situação, janela de 24 h aberta, hora e dia da semana da chegada. Autoria por tempo (Kommo grava `created_by=0` no WhatsApp): saída ≤ 60 s da criação = robô; nas `AGENTE_IA_JANELAS`, resposta ≤ 60 s ao lead (ou ≤ 15 s após outra da IA) = IA. `lista_esperando` (nome/telefone/link) só com `expor_pessoais`. Gate no `main()`: linhas + `fora_da_janela` = leads com data. Validado contra a planilha de 21/09 (38/99/92, 113, 98, 9,3 h — idêntico) |
 | `crm_regiao` | dict(7) | `aggregate_regiao` | Origem geográfica dos leads pelo **DDD do telefone** do contato (o Kommo não tem cidade/estado): `metodo, canais, area_atendida, ddds{ddd:{uf,polo,area}}, ufs{uf:{nome,regiao}}, daily[{dia,ddd,form,direto}], cobertura`. `ddd ""` = sem DDD válido (a soma bate com o total de leads — gate no `main()`). `form` = tag `metaform`/`fb<id>` no Kommo; `canais=false` se a coleta não trouxe tags. Tabela DDD → UF em `regioes_br.py`; área atendida em `AREA_ATENDIDA_UFS` (padrão SP,MG,PR,RJ). Só contagens — sem PII |
 | `relatorio` | dict(9) | `build_relatorio` (1076) | `mes, leads_mes, leads_mes_anterior, delta_leads_pct, gasto_meta_mes, conversas_meta_mes, cpl_plat_mes, rastreamento_pct, alertas[]` |
 
@@ -627,7 +634,7 @@ são **relativos** — caminho absoluto com `/` quebra o Pages, que roda em subc
 
 | Página | Função | Linha | O que mostra | Lê do summary |
 |---|---|---|---|---|
-| Visão Geral | `renderVisaoB2B` → `renderOtimizacao(el,'b2b')` | 1430 / 1404 | Dashboard de Otimização: ciclo de orçamento, período, campanhas, "o que fazer agora", evolução, histórico, resultado, ações. No fim, seção **"De onde vêm os leads"** (21/09, pedido da Isabela): KPIs de área atendida + barras empilhadas formulário × direto por estado (top 10 + "Outros") e por área de DDD (top 12), com o filtro de período — `regiaoHtml`/`regiaoCharts`/`regiaoBarras` | `otimizacao_b2b`, `meta_b2b`, `google_b2b`, `config`, `relatorio`, `crm_regiao` |
+| Visão Geral | `renderVisaoB2B` → `renderOtimizacao(el,'b2b')` | 1430 / 1404 | Dashboard de Otimização: ciclo de orçamento, período, campanhas, "o que fazer agora", evolução, histórico, resultado, ações. Desde 21/09 (pedidos da Isabela): atalhos para as seções no topo (`secNavHtml`), alerta de atendimento com dinheiro em jogo em "Qual ação tomar", e três seções depois do "Detalhe da frente": **"Atendimento dos leads"** (`atendHtml`/`atendCharts` — substitui a planilha de leads sem resposta: 6 KPIs, situação × há quanto tempo, velocidade da resposta × conversa, "Quanto dá para melhorar" com estimativa pela taxa de quem é respondido em até 1 h, "Quando os leads escrevem", "O que fazer agora", tabela por responsável medida pelas mensagens e lista nominal só com login), **"De onde vêm os leads"** (`regiaoHtml`/`regiaoCharts`) e **"Quem são os leads"** (`tipoHtml`/`tipoCharts`, tipo de negócio do formulário). A antiga tabela "Qualidade de atendimento por responsável" saiu: media o 1º atendimento pela troca de etapa, que o Kommo faz sozinho (dava 0% sem atendimento) | `otimizacao_b2b`, `meta_b2b`, `google_b2b`, `config`, `relatorio`, `crm_regiao`, `atendimento_leads` |
 | Funil CRM | `renderFunilCRM` | 1502 | Funil por etapa, ativos, perdas e motivos, responsáveis, ciclo, tempo parado, leads parados (PII quando liberado) | `crm` |
 | Atendimento | `renderAtendimento` | 1688 | Mensagens recebidas/enviadas, conversas, 1ª resposta (mediana/p90/faixas), % automática, mensagens por hora | `atendimento` |
 | Meta Ads | `renderMetaB2B` | 1798 | Mensal e diário (gasto × leads), campanhas, conjuntos, criativos com thumbnail | `meta_b2b` |
@@ -841,6 +848,16 @@ Permissões `{contents: read, pages: write, id-token: write}`; `concurrency: {gr
 Total de mídia: **R$ 7.560/mês**. Gravados no commit `8e191ae` (11/09/2026). Todos
 lidos com `float(os.getenv(..., "0") or 0)` — **uma Variable vazia ou apagada
 equivale a 0 e apaga o indicador silenciosamente**, sem erro no log.
+
+Configurações com padrão no `config.py` (21/09/2026) — **ainda não passam pelo
+workflow**: para mudar em produção, criar a Variable **e** incluir a linha no `env`
+do passo "Coleta das demais fontes + ETL" do `deploy_pages.yml`. Valor vazio cai no padrão.
+
+| Config | Padrão | Efeito |
+|---|---|---|
+| `AREA_ATENDIDA_UFS` | `SP,MG,PR,RJ` | estados atendidos no atacado — "na área × fora da área" em De onde vêm os leads |
+| `AGENTE_IA_JANELAS` | `2026-09-14T09:30/2026-09-14T11:20` | períodos (Brasília) em que o agente de IA do Kommo respondeu sozinho; respostas dele não contam como da equipe. Fim vazio = ligado até hoje. **Quando o agente Téo entrar no ar, acrescentar a janela** |
+| `HORARIO_ATENDIMENTO` | `06-18` | horário da equipe em dias úteis (observado nas mensagens) — tabela "Quando os leads escrevem" |
 
 ### 10.5 GitHub Pages
 

@@ -921,8 +921,24 @@ function otCfg(front) {
     resNome: 'resultado'
   };
 }
-function secTitle(txt, sub) {
-  return '<h2 class="sec-title">' + txt + (sub ? ' <span>— ' + sub + '</span>' : '') + '</h2>';
+function secTitle(txt, sub, id) {
+  return '<h2 class="sec-title"' + (id ? ' id="' + id + '"' : '') + '>' + txt + (sub ? ' <span>— ' + sub + '</span>' : '') + '</h2>';
+}
+/* Atalhos para as seções — a Visão Geral B2B é longa. Botões (não links):
+   o hash da URL é a rota da página. */
+function secNavHtml(secoes) {
+  return '<nav class="sec-nav" aria-label="Ir para a seção">' + secoes.map(s =>
+    '<button type="button" data-alvo="' + s[0] + '">' + s[1] + '</button>').join('') + '</nav>';
+}
+function secNavBind(el) {
+  el.querySelectorAll('.sec-nav button').forEach(b => b.addEventListener('click', () => {
+    const alvo = document.getElementById(b.dataset.alvo);
+    if (alvo) alvo.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
+}
+function acaoCard(kind, tag, titulo, corpo) {
+  return '<div class="action-card ' + kind + '"><span class="badge ' + (kind === 'crit' ? 'red' : kind === 'ok' ? 'green' : 'gray') + '">' + tag + '</span>' +
+    '<div class="ac-tx"><div class="ac-t">' + titulo + '</div><div class="ac-b">' + corpo + '</div></div></div>';
 }
 function pbar(pct, danger) {
   const w = Math.max(0, Math.min(100, pct || 0));
@@ -1383,9 +1399,24 @@ function otAcoesHtml(c) {
   const orcTotal = c.orcMeta + c.orcGoogle;
   const zr = c.ot.zero_retorno || { total_gasto: 0, itens: [] };
   const cards = [];
-  const aCard = (kind, tag, titulo, corpo) =>
-    '<div class="action-card ' + kind + '"><span class="badge ' + (kind === 'crit' ? 'red' : kind === 'ok' ? 'green' : 'gray') + '">' + tag + '</span>' +
-    '<div class="ac-tx"><div class="ac-t">' + titulo + '</div><div class="ac-b">' + corpo + '</div></div></div>';
+  const aCard = acaoCard;
+  // B2B: o gargalo do atendimento também é dinheiro em jogo (leads pagos parados)
+  if (c.front === 'b2b') {
+    // Um alerta só (os grupos se sobrepõem): quem nunca falou com uma pessoa.
+    const g = atendResumo();
+    if (g && g.nuncaPessoa.length) {
+      const nf = g.nuncaPessoa.filter(r => r.form).length;
+      const din = g.cpl != null && nf ? g.cpl * nf : null;
+      const esp24 = g.esperando1.filter(r => (r.idade || 0) > 24).length;
+      const rob = g.nuncaPessoa.filter(r => r.s === 'R').length;
+      cards.push(aCard('crit', 'Crítico', fmt.num(g.nuncaPessoa.length) + ' leads do período nunca falaram com uma pessoa' +
+        (din ? ' — ' + fmt.currency(din) + ' investidos neles' : ''),
+        fmt.num(g.esperando1.length) + ' escreveram e esperam a 1ª resposta (' + fmt.num(esp24) + ' há mais de 24 h) e ' +
+        fmt.num(rob) + ' só receberam a boas-vindas do robô' +
+        (din ? ' · ' + fmt.num(nf) + ' vieram do formulário, a ' + fmt.currency(g.cpl) + ' por lead (CPL do período)' : '') +
+        '. Detalhe e próximos passos em Atendimento dos leads.'));
+    }
+  }
   if (zr.total_gasto > 0) {
     cards.push(aCard('crit', 'Crítico', fmt.currency(zr.total_gasto) + ' gastos sem nenhum resultado',
       fmt.num((zr.itens || []).length) + ' anúncio(s) com gasto e zero resultado em toda a série — pausar ou trocar o criativo. Lista na seção acima.'));
@@ -1432,24 +1463,37 @@ function renderOtimizacao(el, front) {
   const c = otCfg(front);
   const p = otPeriodo(c);
   const dd = otDailyData(c);
+  const b2b = front === 'b2b';
   let html = otHeaderHtml(front);
-  html += secTitle('Controle de investimento', 'ciclo mensal e distribuição do gasto');
+  if (b2b) html += secNavHtml(OT_SECOES_B2B);
+  html += secTitle('Controle de investimento', 'ciclo mensal e distribuição do gasto', 'sec-investimento');
   html += otCicloHtml(c);
-  html += secTitle('O que está acontecendo', 'volume e eficiência no período selecionado');
+  html += secTitle('O que está acontecendo', 'volume e eficiência no período selecionado', 'sec-agora');
   html += otAgoraHtml(c, p);
-  html += secTitle('Como está evoluindo', 'dia a dia do período selecionado');
+  html += secTitle('Como está evoluindo', 'dia a dia do período selecionado', 'sec-evolucao');
   html += otEvolucaoHtml(c, dd);
-  html += secTitle('Histórico mensal', 'mês a mês — independe do filtro');
+  html += secTitle('Histórico mensal', 'mês a mês — independe do filtro', 'sec-historico');
   html += otHistHtml(c);
-  html += secTitle('Onde está o resultado', 'e onde o dinheiro está parado');
+  html += secTitle('Onde está o resultado', 'e onde o dinheiro está parado', 'sec-resultado');
   html += otResultadoHtml(c);
-  html += secTitle('Qual ação tomar', 'alertas priorizados por dinheiro em jogo');
+  html += secTitle('Qual ação tomar', 'alertas priorizados por dinheiro em jogo', 'sec-acoes');
   html += otAcoesHtml(c);
-  html += front === 'b2b' ? otLegadoB2B() : otLegadoEcom();
+  html += b2b ? otLegadoB2B() + atendHtml() + regiaoHtml() + tipoHtml() : otLegadoEcom();
   el.innerHTML = html;
   otCharts(c, dd);
-  if (front === 'b2b') regiaoCharts();
+  if (b2b) {
+    secNavBind(el);
+    atendCharts();
+    regiaoCharts();
+    tipoCharts();
+  }
 }
+const OT_SECOES_B2B = [
+  ['sec-investimento', 'Investimento'], ['sec-agora', 'Período'], ['sec-evolucao', 'Evolução'],
+  ['sec-historico', 'Histórico'], ['sec-resultado', 'Resultado'], ['sec-acoes', 'Ações'],
+  ['sec-detalhe', 'Funil e origens'], ['sec-atendimento', 'Atendimento dos leads'],
+  ['sec-regiao', 'Estados e DDDs'], ['sec-tipo', 'Tipo de negócio']
+];
 
 /* ============================================================
    B2B · VISÃO GERAL — dashboard de otimização + detalhe da frente
@@ -1469,7 +1513,7 @@ function otLegadoB2B() {
   const cpl = (invest > 0 && leadsPagos > 0) ? invest / leadsPagos : null;
   const cobEf = (DATA.utm || {}).cobertura_efetiva || {};
 
-  let html = secTitle('Detalhe da frente', 'funil, origens e atendimento');
+  let html = secTitle('Detalhe da frente', 'funil e origem dos leads', 'sec-detalhe');
   html += '<div class="kpis cols-4">' +
     kpi('CPL (CRM)', cpl == null ? null : fmt.currency(cpl),
       cpl == null ? 'sem leads pagos no período*' : 'investimento ÷ leads pagos do CRM*', { teal: true }) +
@@ -1479,7 +1523,7 @@ function otLegadoB2B() {
     '</div>';
 
   html += '<div class="note-blue">* <strong>CPL (CRM)</strong> = investimento nas campanhas de leads B2B (meta_b2b) ÷ leads do CRM ' +
-    'atribuídos ao tráfego pago por <strong>origem efetiva</strong> (UTM ou planilha do formulário). ' +
+    'atribuídos ao tráfego pago por <strong>origem efetiva</strong> (UTM, planilha do formulário ou tag do formulário no Kommo). ' +
     'Cobertura efetiva: <strong>' + fmt.pct(cobEf.pct, 0) + '</strong> dos leads têm atribuição — o CPL descreve essa fatia rastreada, não o total. ' +
     'E-commerce e impulsionamento ficam no painel E-commerce.</div>';
 
@@ -1493,7 +1537,7 @@ function otLegadoB2B() {
     '<tr><td class="name">' + esc(r.fonte) + '</td>' +
     '<td class="r">' + fmt.num(r.leads) + '</td></tr>').join('');
   html += card('Leads por origem (efetiva)',
-    'origem efetiva = UTM do lead <strong>ou</strong> casamento com a planilha do formulário · foto atual da base — não usa o filtro',
+    'origem efetiva = UTM do lead, casamento com a planilha do formulário <strong>ou</strong> tag do formulário no Kommo · foto atual da base — não usa o filtro',
     srcRows
       ? tableWrap([{ t: 'Origem (efetiva)' }, { t: 'Leads', r: 1 }], srcRows) +
       '<div class="note">Cobertura efetiva: <strong>' + fmt.pct(cobEf.pct, 0) + '</strong> — ' +
@@ -1501,27 +1545,10 @@ function otLegadoB2B() {
       '(' + esc(cobEf.nota || 'UTM ou planilha do formulário') + '). Detalhe completo na página Rastreamento (UTM).</div>'
       : emptyDashed('Nenhuma origem efetiva registrada na base.'));
 
-  // ----- Qualidade de atendimento por responsável -----
-  const qual = DATA.qualidade_responsavel || [];
-  const qualRows = qual.map(r =>
-    '<tr><td class="name">' + esc(r.responsavel || 'sem responsável') + '</td>' +
-    '<td class="r">' + fmt.num(r.leads) + '</td>' +
-    '<td class="r">' + fmt.num(r.vendas) + '</td>' +
-    '<td class="r">' + fmt.num(r.perdidos) + '</td>' +
-    '<td class="r">' + fmt.pct(r.taxa_conv) + '</td>' +
-    '<td class="r">' + fmt.pct(r.sem_1o_atend_pct) + '</td>' +
-    '<td class="r">' + fmt.days(r.tempo_1o_atend_dias) + '</td>' +
-    '<td class="r">' + fmt.days(r.parado_dias) + '</td></tr>').join('');
-  html += card('Qualidade de atendimento por responsável',
-    'foto atual do funil — <strong>não usa o filtro de período</strong> · "1º atendimento" = lead saiu da etapa de entrada · resolução diária',
-    qualRows
-      ? tableWrap([
-        { t: 'Responsável' }, { t: 'Leads', r: 1 }, { t: 'Vendas', r: 1 }, { t: 'Perdidos', r: 1 },
-        { t: 'Taxa conv.', r: 1 }, { t: 'Sem 1º atend.', r: 1 }, { t: 'Tempo 1º atend.', r: 1 }, { t: 'Parado (médio)', r: 1 }
-      ], qualRows)
-      : emptyDashed('Sem dados por responsável.'));
-
-  html += regiaoHtml();
+  // A antiga "Qualidade de atendimento por responsável" media o 1º atendimento
+  // pela troca de etapa — que o Kommo faz sozinho ao criar o lead (dava 0% sem
+  // atendimento). Agora a tabela por responsável mede pelas mensagens, na
+  // seção "Atendimento dos leads" logo abaixo.
   return html;
 }
 
@@ -1567,7 +1594,7 @@ function listaPt(arr) {
   return arr.length > 1 ? arr.slice(0, -1).join(', ') + ' e ' + arr[arr.length - 1] : arr.join('');
 }
 function regiaoHtml() {
-  let html = secTitle('De onde vêm os leads', 'estado e área de DDD do telefone · leads criados no período');
+  let html = secTitle('De onde vêm os leads', 'estado e área de DDD do telefone · leads criados no período', 'sec-regiao');
   const g = regiaoResumo();
   if (!g) return html + card('', '', emptyDashed('A origem geográfica dos leads ainda não está nesta versão dos dados.', 'Aparece na próxima atualização do painel.'));
   if (!g.total) return html + card('', '', emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
@@ -1673,6 +1700,401 @@ function regiaoBarras(id, itens, g, comPct) {
       scales: {
         x: yCount({ position: 'bottom', stacked: true, grace: '8%', ticks: { maxRotation: 0, minRotation: 0, precision: 0 } }),
         y: { stacked: true, grid: { display: false }, ticks: { autoSkip: false, color: c => dentro(itens[c.index] || { ufs: [] }) ? P.soft : P.muted } }
+      }
+    })
+  });
+}
+
+/* ---------- Atendimento dos leads (DATA.atendimento_leads) ----------
+   Uma linha por lead (sem dado pessoal) com a situação da conversa na última
+   atualização e os tempos de resposta. O Kommo não grava quem enviou cada
+   mensagem do WhatsApp: robô × pessoa sai do tempo (regras no ETL).
+   Período = dia de criação do lead. */
+/* Situação de exibição: o "E" do ETL (lead escreveu por último) vira E1
+   (nunca teve resposta de uma pessoa — pendência certa) ou E2 (já conversou;
+   a última mensagem é do lead — pode ser pergunta ou só um "obrigado"). */
+const SITUACOES = [
+  { k: 'E1', nome: 'Esperando a 1ª resposta', desc: 'o lead escreveu e ninguém da equipe respondeu até agora' },
+  { k: 'E2', nome: 'Escreveu de novo, sem retorno', desc: 'já conversou com a equipe e a última mensagem é do lead — pode ser uma pergunta ou só um "obrigado"' },
+  { k: 'P', nome: 'Lead parou de responder', desc: 'a equipe falou por último e o lead não voltou' },
+  { k: 'R', nome: 'Só o robô falou', desc: 'o lead não respondeu a boas-vindas automática e ninguém da equipe escreveu' },
+  { k: 'N', nome: 'Sem conversa', desc: 'nenhuma mensagem registrada no Kommo' }
+];
+const IDADES_SITUACAO = [
+  { nome: 'até 24 h', max: 24 }, { nome: '1 a 3 dias', max: 72 },
+  { nome: '3 a 7 dias', max: 168 }, { nome: 'mais de 7 dias', max: Infinity }
+];
+const FAIXAS_RESPOSTA = [
+  { nome: 'até 15 min', max: 0.25 }, { nome: '15 a 60 min', max: 1 }, { nome: '1 a 4 h', max: 4 },
+  { nome: '4 a 24 h', max: 24 }, { nome: 'mais de 24 h', max: Infinity }, { nome: 'sem resposta', max: null }
+];
+function medianaDe(vals) {
+  const v = vals.filter(x => x != null).sort((a, b) => a - b);
+  return v.length ? quantile(v, 0.5) : null;
+}
+function fmtHoras(h) { return h == null ? '—' : fmt.mins(h * 60); }
+function fmtGerado(iso) {
+  return iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) + ' às ' + iso.slice(11, 16) : '—';
+}
+function faixaResposta(r) {
+  if (r.hr == null) return FAIXAS_RESPOSTA.length - 1;
+  return FAIXAS_RESPOSTA.findIndex(f => f.max != null && r.hr <= f.max);
+}
+function idadeIdx(h) { return IDADES_SITUACAO.findIndex(f => (h || 0) <= f.max); }
+function atendResumo() {
+  const A = DATA.atendimento_leads;
+  if (!A || !Array.isArray(A.linhas) || !Array.isArray(A.colunas)) return null;
+  const ix = Object.create(null);
+  A.colunas.forEach((c, i) => { ix[c] = i; });
+  const tipos = A.tipos || [], etapas = A.etapas || [], resps = A.responsaveis || [];
+  const rows = A.linhas.filter(r => inPeriod(r[ix.dia])).map(r => {
+    const t = tipos[r[ix.tipo]] || {};
+    const s = r[ix.situacao];
+    return {
+      s: s === 'E' ? (r[ix.h_1o_contato_humano] == null ? 'E1' : 'E2') : s,
+      form: r[ix.canal] === 'f', etapa: etapas[r[ix.etapa]] || '?',
+      tipo: t.nome || 'Não informado', foraPublico: !!t.fora_do_publico,
+      resp: resps[r[ix.responsavel]] || 'Sem responsável',
+      h1: r[ix.h_1o_contato_humano], hr: r[ix.h_1a_resposta_humana],
+      continuou: r[ix.continuou] === 1, escreveu: r[ix.escreveu] === 1,
+      tent: r[ix.tentativas] || 0, idade: r[ix.h_na_situacao], janela: r[ix.janela_aberta] === 1,
+      hora: r[ix.hora_chegada], dsem: r[ix.dia_semana_chegada]
+    };
+  });
+  // CPL do período = a mesma conta do KPI "CPL (CRM)": investimento Meta B2B ÷ leads pagos
+  const invest = sum(fdays((DATA.meta_b2b || {}).daily), 'gasto');
+  const pagos = sum(fdays((DATA.leads || {}).daily), 'pagos');
+  const abertos = rows.filter(r => r.s !== 'F');
+  return {
+    A, rows, abertos,
+    cpl: invest > 0 && pagos > 0 ? invest / pagos : null,
+    nuncaPessoa: abertos.filter(r => r.h1 == null),
+    esperando1: abertos.filter(r => r.s === 'E1'),
+    semRetorno: abertos.filter(r => r.s === 'E2'),
+    antesDaJanela: !!A.desde && FILTER.start < A.desde
+  };
+}
+function velocidade(rows) {
+  const n = FAIXAS_RESPOSTA.map(() => 0), c = FAIXAS_RESPOSTA.map(() => 0);
+  rows.filter(r => r.escreveu).forEach(r => { const f = faixaResposta(r); n[f]++; if (r.continuou) c[f]++; });
+  return { n, c };
+}
+function atendHtml() {
+  let html = secTitle('Atendimento dos leads', 'como está, quanto custa e quanto dá para melhorar', 'sec-atendimento');
+  const g = atendResumo();
+  if (!g) return html + card('', '', emptyDashed('O atendimento dos leads ainda não está nesta versão dos dados.', 'Aparece na próxima atualização do painel.'));
+  if (!g.rows.length) return html + card('', '', emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
+  const R = g.rows, N = R.length;
+  const falou = R.filter(r => r.h1 != null).length;
+  const escreveram = R.filter(r => r.escreveu);
+  const respondidos = escreveram.filter(r => r.hr != null);
+  const medResp = medianaDe(respondidos.map(r => r.hr));
+  const ate1h = respondidos.filter(r => r.hr <= 1).length;
+  const E = g.esperando1, E2 = g.semRetorno;
+  const e24 = E.filter(r => (r.idade || 0) > 24).length;
+  const eFech = E.filter(r => !r.janela).length;
+  const P = g.abertos.filter(r => r.s === 'P');
+  const p1 = P.filter(r => r.tent <= 1);
+  const rob = g.abertos.filter(r => r.s === 'R').length;
+  const nuncaForm = g.nuncaPessoa.filter(r => r.form).length;
+  const dinheiro = g.cpl != null ? g.cpl * nuncaForm : null;
+  const conversaram = g.abertos.filter(r => r.escreveu);
+  const presos = conversaram.filter(r => /contato inicial/i.test(r.etapa)).length;
+  const fechados = N - g.abertos.length;
+
+  html += '<div class="note-blue">Situação das conversas em <strong>' + esc(fmtGerado(g.A.gerado_em)) + '</strong> (última atualização) dos <strong>' +
+    fmt.num(N) + ' leads criados no período</strong>. O Kommo não registra quem enviou cada mensagem do WhatsApp: ' +
+    'a boas-vindas automática (até 1 min depois da entrada do lead) e as respostas do agente de IA, nos períodos em que ele esteve ligado, não contam como resposta da equipe.' +
+    (g.antesDaJanela ? ' Leads criados antes de ' + fmt.dateFull(g.A.desde) + ' ficam de fora: o histórico de mensagens coletado do Kommo cobre os últimos meses.' : '') + '</div>';
+
+  html += '<div class="kpis cols-6">' +
+    kpi('Falaram com uma pessoa', fmt.pct(falou / N * 100, 0),
+      fmt.num(g.nuncaPessoa.length) + ' leads em aberto nunca receberam mensagem da equipe') +
+    kpi('1ª resposta da equipe', medResp == null ? null : fmtHoras(medResp),
+      medResp == null ? 'nenhum lead que escreveu foi respondido no período'
+        : 'mediana, desde a 1ª mensagem do lead · ' + fmt.pct(ate1h / respondidos.length * 100, 0) + ' respondidos em até 1 h') +
+    kpi('Esperando a 1ª resposta', fmt.num(E.length),
+      'escreveram e ninguém respondeu · ' + fmt.num(e24) + ' há mais de 24 h · ' + fmt.num(eFech) + ' só aceitam template') +
+    kpi('Escreveram de novo, sem retorno', fmt.num(E2.length),
+      'já conversaram; a última mensagem é do lead — vale conferir') +
+    kpi('Pararam após 1 tentativa', fmt.num(p1.length),
+      'de ' + fmt.num(P.length) + ' conversas em que a equipe falou por último') +
+    kpi('Investido em leads sem atendimento', dinheiro == null ? null : fmt.currency(dinheiro),
+      dinheiro == null ? 'sem CPL no período (sem investimento ou sem leads pagos)'
+        : fmt.num(nuncaForm) + ' leads do formulário nunca falaram com uma pessoa · CPL ' + fmt.currency(g.cpl)) +
+    '</div>';
+
+  // ----- situação × há quanto tempo + velocidade × conversa -----
+  const sits = SITUACOES.filter(s => s.k !== 'N' || g.abertos.some(r => r.s === 'N'));
+  const sitRel = sits.map(s => {
+    const L = g.abertos.filter(r => r.s === s.k);
+    return '<tr><td class="name">' + s.nome + '</td><td class="dim">' + s.desc + '</td><td class="r">' + fmt.num(L.length) + '</td>' +
+      IDADES_SITUACAO.map((f, i) => '<td class="r">' + fmt.num(L.filter(r => idadeIdx(r.idade) === i).length) + '</td>').join('') +
+      '<td class="r">' + fmt.num(L.filter(r => !r.janela).length) + '</td></tr>';
+  }).join('');
+  const vel = velocidade(R);
+  const velRel = FAIXAS_RESPOSTA.map((f, i) => '<tr><td>' + f.nome + '</td><td class="r">' + fmt.num(vel.n[i]) + '</td>' +
+    '<td class="r">' + (f.max == null ? '—' : fmt.num(vel.c[i])) + '</td>' +
+    '<td class="r">' + (f.max == null || !vel.n[i] ? '—' : fmt.pct(vel.c[i] / vel.n[i] * 100, 0)) + '</td></tr>').join('');
+  html += '<div class="grid-2">' +
+    chartCard('Situação das conversas', 'leads em aberto do período · há quanto tempo estão assim', 'ch-at-situacao', 'tall',
+      '<div class="note">' + (fechados ? fmt.num(fechados) + ' lead(s) já fechados (ganho ou perdido) ficam fora desta conta. ' : '') +
+      '<strong>Só template</strong> = passaram 24 h desde a última mensagem do lead (ou ele nunca escreveu): o WhatsApp só aceita modelo aprovado.</div>' +
+      reliefTable([{ t: 'Situação' }, { t: 'O que significa' }, { t: 'Leads', r: 1 }]
+        .concat(IDADES_SITUACAO.map(f => ({ t: f.nome, r: 1 }))).concat([{ t: 'Só template', r: 1 }]), sitRel)) +
+    multiChartCard('Velocidade da resposta × conversa',
+      'leads que escreveram no período · acima: quantos, pela espera até a 1ª resposta da equipe · abaixo: % que voltou a escrever depois dessa resposta',
+      'ch-at-vel-n', 'ch-at-vel-taxa',
+      '<div class="note">Em terracota, quem escreveu e ainda não teve resposta da equipe.</div>' +
+      reliefTable([{ t: 'Espera até a 1ª resposta' }, { t: 'Leads', r: 1 }, { t: 'Continuaram', r: 1 }, { t: '% continuou', r: 1 }], velRel)) +
+    '</div>';
+
+  // ----- quanto dá para melhorar (só com dado do próprio período) -----
+  const nRap = vel.n[0] + vel.n[1], cRap = vel.c[0] + vel.c[1];
+  const taxaRap = nRap >= 10 ? cRap / nRap : null;
+  const taxaLen = vel.n[4] >= 10 ? vel.c[4] / vel.n[4] : null;
+  const itens = [];
+  if (taxaRap != null) {
+    let potencial = vel.n[5] * taxaRap, baseLenta = vel.n[5];
+    [2, 3, 4].forEach(f => {
+      baseLenta += vel.n[f];
+      if (vel.n[f]) potencial += vel.n[f] * Math.max(0, taxaRap - vel.c[f] / vel.n[f]);
+    });
+    itens.push('Quando a equipe responde em <strong>até 1 h</strong>, <strong>' + fmt.pct(taxaRap * 100, 0) + '</strong> dos leads continuam a conversa' +
+      (taxaLen != null ? '; quando a resposta passa de <strong>24 h</strong>, só <strong>' + fmt.pct(taxaLen * 100, 0) + '</strong>.' : '.') +
+      ' <span class="muted">(' + fmt.num(nRap) + ' leads respondidos em até 1 h' + (taxaLen != null ? ' · ' + fmt.num(vel.n[4]) + ' depois de 24 h' : '') + ')</span>');
+    if (baseLenta > 0) {
+      itens.push('Se os <strong>' + fmt.num(baseLenta) + ' leads</strong> que esperaram mais de 1 h ou ficaram sem resposta tivessem sido atendidos em até 1 h, ' +
+        'seriam cerca de <strong>' + fmt.num(Math.round(potencial)) + ' conversas a mais</strong> no período ' +
+        '<span class="muted">(estimativa com a taxa de quem é respondido em até 1 h)</span>.');
+    }
+  } else {
+    itens.push('Ainda não há leads suficientes respondidos em até 1 h no período para medir o efeito da velocidade (mínimo de 10). Amplie o período no topo.');
+  }
+  if (g.nuncaPessoa.length) {
+    itens.push('<strong>' + fmt.num(g.nuncaPessoa.length) + ' leads</strong> em aberto nunca falaram com uma pessoa' +
+      (dinheiro != null && nuncaForm ? ' — <strong>' + fmt.currency(dinheiro) + '</strong> investidos nos ' + fmt.num(nuncaForm) + ' que vieram do formulário.' : '.'));
+  }
+  if (conversaram.length) {
+    itens.push('<strong>' + fmt.num(presos) + ' de ' + fmt.num(conversaram.length) + '</strong> leads que já escreveram seguem em <strong>Contato inicial</strong> — sem a etapa atualizada, o funil do CRM não mostra o avanço real.');
+  }
+  const hor = g.A.horario_atendimento || [6, 18];
+  const slotNomes = ['Seg a sex, das ' + hor[0] + 'h às ' + hor[1] + 'h', 'Seg a sex, fora desse horário', 'Sábado e domingo'];
+  const slotDe = r => r.dsem >= 5 ? 2 : (r.hora >= hor[0] && r.hora < hor[1] ? 0 : 1);
+  const slotRows = slotNomes.map((nome, i) => {
+    const L = escreveram.filter(r => slotDe(r) === i);
+    const resp = L.filter(r => r.hr != null);
+    return '<tr><td class="name">' + nome + '</td><td class="r">' + fmt.num(L.length) + '</td>' +
+      '<td class="r">' + fmtHoras(medianaDe(resp.map(r => r.hr))) + '</td>' +
+      '<td class="r">' + (L.length ? fmt.pct(resp.filter(r => r.hr <= 1).length / L.length * 100, 0) : '—') + '</td>' +
+      '<td class="r">' + fmt.num(L.length - resp.length) + '</td></tr>';
+  }).join('');
+  html += '<div class="grid-2">' +
+    card('Quanto dá para melhorar', 'o que os próprios dados do período mostram',
+      '<ul class="lista-leitura">' + itens.map(t => '<li>' + t + '</li>').join('') + '</ul>') +
+    card('Quando os leads escrevem', 'hora da 1ª mensagem do lead × espera pela 1ª resposta da equipe',
+      tableWrap([{ t: 'Chegada' }, { t: 'Leads', r: 1 }, { t: '1ª resposta (mediana)', r: 1 },
+        { t: 'Respondidos em até 1 h', r: 1 }, { t: 'Sem resposta', r: 1 }], slotRows) +
+      '<div class="note">Horário da equipe: ' + hor[0] + 'h às ' + hor[1] + 'h em dias úteis, como aparece nas mensagens (ajustável em HORARIO_ATENDIMENTO). A espera é em horas corridas.</div>') +
+    '</div>';
+
+  // ----- o que fazer agora -----
+  const acoes = [];
+  if (E.length) {
+    acoes.push(acaoCard('crit', 'Agora', 'Responder os ' + fmt.num(E.length) + ' leads que esperam a 1ª resposta',
+      'Escreveram e ninguém da equipe respondeu. ' + fmt.num(e24) + ' esperam há mais de 24 h. ' + fmt.num(eFech) +
+      ' já passaram da janela de 24 h do WhatsApp e só podem receber <strong>template aprovado</strong>; ' +
+      'os outros ' + fmt.num(E.length - eFech) + ' ainda aceitam mensagem normal.'));
+  }
+  if (E2.length) {
+    acoes.push(acaoCard('info', 'Conferir', 'Abrir as ' + fmt.num(E2.length) + ' conversas em que o lead escreveu por último',
+      'Já conversaram com a equipe, mas a última mensagem é do lead e ficou sem retorno. Pode ser uma pergunta pendente ou só um agradecimento — vale abrir no Kommo e responder o que for pergunta.'));
+  }
+  if (p1.length) {
+    acoes.push(acaoCard('info', 'Follow-up', 'Voltar a procurar ' + fmt.num(p1.length) + ' leads que pararam depois de 1 tentativa',
+      'A equipe mandou mensagem, o lead não respondeu e ninguém tentou de novo. ' + fmt.num(p1.filter(r => !r.janela).length) + ' deles só aceitam template.'));
+  }
+  if (rob) {
+    acoes.push(acaoCard('info', '1º contato', 'Fazer o 1º contato humano com ' + fmt.num(rob) + ' leads que só receberam a boas-vindas do robô',
+      'Não responderam a mensagem automática e ninguém da equipe escreveu depois. Como nunca escreveram, o contato precisa ser por template aprovado.'));
+  }
+  if (presos) {
+    acoes.push(acaoCard('info', 'CRM', 'Atualizar a etapa de ' + fmt.num(presos) + ' leads que já conversaram',
+      'Eles escreveram e continuam em Contato inicial. Com a etapa certa, o funil e as taxas do painel passam a mostrar o avanço real.'));
+  }
+  if (!acoes.length) {
+    acoes.push(acaoCard('ok', 'Em dia', 'Nenhuma pendência de atendimento no período', 'Todos os leads do período estão com a conversa em dia.'));
+  }
+  html += '<div class="sub-sec">O que fazer agora</div><div class="actions">' + acoes.join('') + '</div>';
+
+  // ----- por responsável + lista nominal (só com login) -----
+  const porResp = Object.create(null);
+  R.forEach(r => { (porResp[r.resp] = porResp[r.resp] || []).push(r); });
+  const respRows = Object.keys(porResp).sort((a, b) => porResp[b].length - porResp[a].length).map(k => {
+    const L = porResp[k], resp = L.filter(r => r.hr != null), ab = L.filter(r => r.s !== 'F');
+    return '<tr><td class="name">' + esc(k) + '</td><td class="r">' + fmt.num(L.length) + '</td>' +
+      '<td class="r">' + fmt.pct(L.filter(r => r.h1 != null).length / L.length * 100, 0) + '</td>' +
+      '<td class="r">' + fmtHoras(medianaDe(resp.map(r => r.hr))) + '</td>' +
+      '<td class="r">' + fmt.num(ab.filter(r => r.s === 'E1').length) + '</td>' +
+      '<td class="r">' + fmt.num(ab.filter(r => r.h1 == null).length) + '</td>' +
+      '<td class="r">' + fmt.num(L.filter(r => /ganho/i.test(r.etapa)).length) + '</td>' +
+      '<td class="r">' + fmt.num(L.filter(r => /perdido/i.test(r.etapa)).length) + '</td></tr>';
+  }).join('');
+  const lista = g.A.lista_esperando || { disponivel: false };
+  const listaRows = lista.disponivel === true ? (lista.itens || []).map(i => {
+    const link = safeHttpUrl(i.link);
+    return '<tr><td class="name">' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener">' + esc(i.nome) + '</a>' : esc(i.nome)) + '</td>' +
+      '<td>' + esc(i.telefone) + '</td><td class="peri">' + esc(i.tipo) + '</td>' +
+      '<td>' + (i.nunca_respondido ? '1ª resposta' : '<span class="muted">sem retorno</span>') + '</td>' +
+      '<td class="r">' + fmtHoras(i.espera_h) + '</td>' +
+      '<td>' + (i.janela_aberta ? 'aberta' : '<span class="muted">só template</span>') + '</td></tr>';
+  }).join('') : '';
+  html += '<div class="grid-2">' +
+    card('Atendimento por responsável', 'leads criados no período · medido pelas mensagens',
+      tableWrap([{ t: 'Responsável' }, { t: 'Leads', r: 1 }, { t: 'Falaram com pessoa', r: 1 }, { t: '1ª resposta (mediana)', r: 1 },
+        { t: 'Esperando 1ª resposta', r: 1 }, { t: 'Nunca procurados', r: 1 }, { t: 'Ganhos', r: 1 }, { t: 'Perdidos', r: 1 }], respRows) +
+      '<div class="note">Responsável = dono do lead no Kommo. A 1ª resposta é medida desde a 1ª mensagem do lead, em horas corridas.</div>') +
+    card('Quem está esperando', 'primeiro quem nunca foi respondido, depois quem espera há mais tempo · até 50 · todos os períodos',
+      listaRows
+        ? tableWrap([{ t: 'Lead' }, { t: 'Telefone' }, { t: 'Tipo de negócio' }, { t: 'Espera' }, { t: 'Há', r: 1 }, { t: 'Janela 24 h' }], listaRows)
+        : emptyDashed('Lista nominal indisponível por enquanto.', esc(lista.motivo || 'Nenhum lead esperando a equipe.'))) +
+    '</div>';
+  return html;
+}
+function atendCharts() {
+  const g = atendResumo();
+  if (!g || !g.rows.length) return;
+  const sits = SITUACOES.filter(s => s.k !== 'N' || g.abertos.some(r => r.s === 'N'));
+  // idade = ordinal → rampa âmbar; no fundo escuro, mais tempo = mais claro (salta mais)
+  const cores = [AMBER_RAMP[4], AMBER_RAMP[3], AMBER_RAMP[2], AMBER_RAMP[1]];
+  const seg = { stack: 'at', borderColor: P.bgCard, borderWidth: 2, borderRadius: 3, borderSkipped: 'left', maxBarThickness: 26 };
+  makeChart('ch-at-situacao', {
+    type: 'bar',
+    data: {
+      labels: sits.map(s => s.nome),
+      datasets: IDADES_SITUACAO.map((f, i) => barDs(f.nome,
+        sits.map(s => g.abertos.filter(r => r.s === s.k && idadeIdx(r.idade) === i).length), cores[i], seg))
+    },
+    options: baseOpts({
+      indexAxis: 'y',
+      interaction: { mode: 'index', axis: 'y', intersect: false },
+      layout: { padding: { right: 22 } },
+      plugins: {
+        legend: legendTop(),
+        directLabels: { mode: 'total', format: v => fmt.num(v) },
+        tooltip: { callbacks: { footer: items => 'Total: ' + fmt.num(items.reduce((a, it) => a + (it.raw || 0), 0)) + ' leads' } }
+      },
+      scales: {
+        x: yCount({ position: 'bottom', stacked: true, grace: '8%', ticks: { maxRotation: 0, minRotation: 0, precision: 0 } }),
+        y: { stacked: true, grid: { display: false }, ticks: { autoSkip: false, color: P.soft } }
+      }
+    })
+  });
+  const vel = velocidade(g.rows);
+  const labels = FAIXAS_RESPOSTA.map(f => f.nome);
+  makeChart('ch-at-vel-n', {
+    type: 'bar',
+    data: { labels, datasets: [barDs('Leads', vel.n, FAIXAS_RESPOSTA.map(f => f.max == null ? S.terracota : S.mostarda))] },
+    options: baseOpts({
+      plugins: {
+        directLabels: { mode: 'all', format: fmt.num },
+        tooltip: { callbacks: { label: it => ' ' + fmt.num(it.raw) + ' leads' } }
+      },
+      scales: { x: xCat({ ticks: { display: false } }), y: lockYWidth(yCount({ grace: '22%', ticks: { precision: 0 } }), 44) }
+    })
+  });
+  const taxas = FAIXAS_RESPOSTA.map((f, i) => f.max != null && vel.n[i] > 0 ? Math.round(vel.c[i] / vel.n[i] * 1000) / 10 : null);
+  makeChart('ch-at-vel-taxa', {
+    type: 'bar',
+    data: { labels, datasets: [barDs('% continuou a conversa', taxas, S.oliva)] },
+    options: baseOpts({
+      plugins: {
+        directLabels: { mode: 'all', format: v => fmt.pct(v, 0) },
+        tooltip: { callbacks: { label: it => ' ' + fmt.pct(it.raw, 0) + ' continuaram · ' + fmt.num(vel.c[it.dataIndex]) + ' de ' + fmt.num(vel.n[it.dataIndex]) } }
+      },
+      scales: {
+        x: xCat(),
+        y: lockYWidth(yCount({ min: 0, max: 115, ticks: { stepSize: 25, callback: v => v <= 100 ? v + '%' : '' } }), 44)
+      }
+    })
+  });
+}
+
+/* ---------- Quem são os leads (tipo de negócio do formulário) ---------- */
+function tipoResumo(g) {
+  const por = Object.create(null);
+  g.rows.forEach(r => { (por[r.tipo] = por[r.tipo] || { nome: r.tipo, fora: r.foraPublico, L: [] }).L.push(r); });
+  const grupo = t => t.nome === 'Não informado' ? 2 : t.fora ? 1 : 0;
+  return Object.keys(por).map(k => por[k])
+    .sort((a, b) => (grupo(a) - grupo(b)) || (b.L.length - a.L.length) || a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+function tipoHtml() {
+  let html = secTitle('Quem são os leads', 'tipo de negócio informado no formulário · leads criados no período', 'sec-tipo');
+  const g = atendResumo();
+  if (!g) return html + card('', '', emptyDashed('O tipo de negócio ainda não está nesta versão dos dados.', 'Aparece na próxima atualização do painel.'));
+  if (!g.rows.length) return html + card('', '', emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
+  const tipos = tipoResumo(g), N = g.rows.length;
+  const informados = tipos.filter(t => t.nome !== 'Não informado');
+  const nInf = informados.reduce((a, t) => a + t.L.length, 0);
+  const maior = informados.filter(t => !t.fora).sort((a, b) => b.L.length - a.L.length)[0];
+  const nFora = informados.filter(t => t.fora).reduce((a, t) => a + t.L.length, 0);
+  html += '<div class="kpis cols-3">' +
+    kpi('Com tipo de negócio', fmt.pct(nInf / N * 100, 0), fmt.num(nInf) + ' de ' + fmt.num(N) + ' leads · quem entra direto pelo WhatsApp não informa') +
+    kpi('Maior grupo', maior ? fmt.pct(maior.L.length / N * 100, 0) : null,
+      maior ? esc(maior.nome) + ' · ' + fmt.num(maior.L.length) + ' leads' : 'nenhum tipo informado no período') +
+    kpi('Fora do público do atacado', fmt.num(nFora), 'se declararam consumidor final (ou são leads de teste)') +
+    '</div>';
+  const linhas = tipos.map(t => {
+    const L = t.L, escreveram = L.filter(r => r.escreveu), resp = escreveram.filter(r => r.hr != null);
+    return '<tr><td class="name">' + esc(t.nome) + (t.fora ? ' <span class="badge gray">fora do público</span>' : '') + '</td>' +
+      '<td class="r">' + fmt.num(L.length) + '</td>' +
+      '<td class="r">' + fmt.pct(L.length / N * 100, 0) + '</td>' +
+      '<td class="r">' + fmt.pct(escreveram.length / L.length * 100, 0) + '</td>' +
+      '<td class="r">' + fmt.pct(L.filter(r => r.h1 != null).length / L.length * 100, 0) + '</td>' +
+      '<td class="r">' + fmtHoras(medianaDe(resp.map(r => r.hr))) + '</td>' +
+      '<td class="r">' + (resp.length ? fmt.pct(resp.filter(r => r.continuou).length / resp.length * 100, 0) : '—') + '</td>' +
+      '<td class="r">' + fmt.num(L.filter(r => /ganho/i.test(r.etapa)).length) + '</td></tr>';
+  }).join('');
+  html += '<div class="grid-2">' +
+    chartCard('Leads por tipo de negócio', 'rótulo = leads · % do período', 'ch-tipo', 'xtall',
+      '<div class="note">O tipo vem da resposta do formulário do anúncio (campo "Tipo de Negócio" do contato no Kommo). Quem entra direto pelo WhatsApp aparece como Não informado.</div>') +
+    card('Como cada tipo de negócio se comporta', 'leads criados no período',
+      tableWrap([{ t: 'Tipo' }, { t: 'Leads', r: 1 }, { t: '% do período', r: 1 }, { t: 'Escreveram', r: 1 }, { t: 'Falaram com pessoa', r: 1 },
+        { t: '1ª resposta (mediana)', r: 1 }, { t: 'Continuaram', r: 1 }, { t: 'Ganhos', r: 1 }], linhas) +
+      '<div class="note"><strong>Escreveram</strong> = mandaram ao menos uma mensagem · <strong>Continuaram</strong> = voltaram a escrever depois da 1ª resposta da equipe (% dos que foram respondidos).</div>') +
+    '</div>';
+  return html;
+}
+function tipoCharts() {
+  const g = atendResumo();
+  if (!g || !g.rows.length) return;
+  const tipos = tipoResumo(g), N = g.rows.length;
+  const cinza = t => !!t && (t.fora || t.nome === 'Não informado');
+  const seg = { stack: 'tp', borderRadius: 4, borderSkipped: 'left', maxBarThickness: 24 };
+  makeChart('ch-tipo', {
+    type: 'bar',
+    data: {
+      labels: tipos.map(t => t.nome),
+      datasets: [
+        barDs('Público do atacado', tipos.map(t => cinza(t) ? null : t.L.length), S.terracota, seg),
+        barDs('Fora do público ou não informado', tipos.map(t => cinza(t) ? t.L.length : null), P.muted, seg)
+      ]
+    },
+    options: baseOpts({
+      indexAxis: 'y',
+      interaction: { mode: 'index', axis: 'y', intersect: false },
+      layout: { padding: { right: 46 } },
+      plugins: {
+        legend: legendTop(),
+        directLabels: { mode: 'total', format: v => fmt.num(v) + ' · ' + fmt.pct(v / N * 100, 0) },
+        tooltip: {
+          filter: it => it.raw != null,
+          callbacks: { label: it => ' ' + fmt.num(it.raw) + ' leads · ' + fmt.pct(it.raw / N * 100, 0) + ' do período' }
+        }
+      },
+      scales: {
+        x: yCount({ position: 'bottom', stacked: true, grace: '8%', ticks: { maxRotation: 0, minRotation: 0, precision: 0 } }),
+        y: { stacked: true, grid: { display: false }, ticks: { autoSkip: false, color: c => cinza(tipos[c.index]) ? P.muted : P.soft } }
       }
     })
   });
@@ -1999,8 +2421,9 @@ function renderMetaB2B(el) {
   if (mt && mt.leads_pagos_meta != null) {
     html += banner('blue', 'Casamento lead ↔ anúncio no nível <strong>' + esc(mt.nivel || 'campanha + criativo') + '</strong>: ' +
       '<strong>' + fmt.num(mt.leads_pagos_meta) + '</strong> leads pagos identificados no CRM — ' +
-      '<strong>' + fmt.num(mt.via_formulario) + '</strong> via planilha do formulário e ' +
-      '<strong>' + fmt.num(mt.via_utm) + '</strong> via UTM · cobertura de ' +
+      '<strong>' + fmt.num(mt.via_formulario) + '</strong> via planilha do formulário, ' +
+      '<strong>' + fmt.num(mt.via_utm) + '</strong> via UTM e ' +
+      '<strong>' + fmt.num(mt.via_tag || 0) + '</strong> pela tag do formulário no Kommo (só campanha — a tag não diz o anúncio) · cobertura de ' +
       '<strong>' + fmt.pct(mt.cobertura_pct, 0) + '</strong> dos leads pagos.');
   }
 

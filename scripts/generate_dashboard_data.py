@@ -133,8 +133,17 @@ def enriquecer_com_planilha(leads, contatos, planilha):
     return stats
 
 
+def lead_do_formulario(lead):
+    """O formulário nativo da Meta chega no Kommo com a tag "metaform" e/ou
+    "fb<id do formulário>". Sem essas tags o lead entrou direto (WhatsApp)."""
+    return any(t == "metaform" or re.fullmatch(r"fb\d+", t or "")
+               for t in lead.get("tags") or [])
+
+
 def origem_efetiva(lead):
-    """Origem mais confiável disponível: UTM > formulário > nada."""
+    """Origem mais confiável disponível: UTM > planilha do formulário >
+    tag do formulário no Kommo > nada. A tag não diz se foi fb ou ig nem
+    qual anúncio — por isso vem depois da planilha."""
     if lead.get("utm_source"):
         return lead["utm_source"]
     form = lead.get("form")
@@ -142,6 +151,8 @@ def origem_efetiva(lead):
         plat = form.get("plataforma") or "meta"
         return f"{plat} (formulário)" if not form.get("organico") \
             else f"{plat} (formulário orgânico)"
+    if lead_do_formulario(lead):
+        return "meta (formulário · tag do Kommo)"
     return None
 
 
@@ -177,6 +188,10 @@ def resolver_fontes(leads, meta_rows):
             fonte = "google"
         elif form and not form.get("organico"):
             fonte = "meta"          # formulário de anúncio = pago Meta
+        elif not form and lead_do_formulario(lead):
+            # Planilha parada (desde 25/08): a tag do formulário no Kommo
+            # ainda prova que o lead veio do anúncio de formulário.
+            fonte = "meta"
         elif not src and lead.get("utm_campaign") \
                 and campanha_meta(lead["utm_campaign"]):
             fonte = "meta"
@@ -210,16 +225,20 @@ def match_leads_meta(leads, meta_rows):
     utm_content={{ad.name}} — o alerta de rastreamento do relatório cobra isso.
     """
     pool = {}
+    campanhas_dia = defaultdict(set)   # campanhas B2B com gasto em cada dia
     for r in meta_rows:
         nome = r.get("campanha", "")
         # Só campanhas da frente B2B: lead de CRM não pode cair em campanha
         # de e-commerce por semelhança de nome.
-        if nome and nome not in pool and classificar_frente(nome) == "b2b":
-            pool[nome] = _tokens(nome)
+        if nome and classificar_frente(nome) == "b2b":
+            if nome not in pool:
+                pool[nome] = _tokens(nome)
+            if (r.get("gasto") or 0) > 0:
+                campanhas_dia[r.get("data")].add(nome)
 
     daily = defaultdict(lambda: defaultdict(int))
     ad_daily = defaultdict(lambda: defaultdict(int))
-    pagos = via_form = via_utm = 0
+    pagos = via_form = via_utm = via_tag = 0
     for lead in leads:
         if fonte_paga(lead) != "meta":
             continue
@@ -240,6 +259,13 @@ def match_leads_meta(leads, meta_rows):
         # 2º) fallback: utm_campaign × nome da campanha (Jaccard)
         campanha = lead.get("utm_campaign")
         if not campanha:
+            # 3º) só a tag do formulário no Kommo (planilha parada): vale a
+            #     campanha B2B que teve gasto no dia — se houver UMA só. Sem
+            #     criativo nem conjunto: a tag não diz qual anúncio.
+            candidatas = campanhas_dia.get(d) or set()
+            if lead_do_formulario(lead) and len(candidatas) == 1:
+                daily[next(iter(candidatas))][d] += 1
+                via_tag += 1
             continue
         toks = _tokens(campanha)
         if not toks:
@@ -255,17 +281,19 @@ def match_leads_meta(leads, meta_rows):
             daily[best][d] += 1
             via_utm += 1
 
-    matched = via_form + via_utm
+    matched = via_form + via_utm + via_tag
     stats = {
         "nivel": "campanha + criativo (formulário)",
         "leads_pagos_meta": pagos,
         "via_formulario": via_form,
         "via_utm": via_utm,
+        "via_tag": via_tag,
         "matched": matched,
         "cobertura_pct": rnd(matched / pagos * 100, 1) if pagos else 0,
     }
     print(f"  Matching Meta: {matched}/{pagos} pagos casados "
-          f"({via_form} pelo formulário, {via_utm} por UTM)")
+          f"({via_form} pelo formulário, {via_utm} por UTM, "
+          f"{via_tag} pela tag do Kommo)")
     return daily, ad_daily, stats
 
 
@@ -315,13 +343,6 @@ def aggregate_leads(leads):
     }
 
 
-def lead_do_formulario(lead):
-    """O formulário nativo da Meta chega no Kommo com a tag "metaform" e/ou
-    "fb<id do formulário>". Sem essas tags o lead entrou direto (WhatsApp)."""
-    return any(t == "metaform" or re.fullmatch(r"fb\d+", t or "")
-               for t in lead.get("tags") or [])
-
-
 def aggregate_regiao(leads, contatos):
     """Leads do CRM por DDD do telefone do contato principal.
 
@@ -347,7 +368,7 @@ def aggregate_regiao(leads, contatos):
         if ddd:
             ddds[ddd] = {"uf": loc["uf"], "polo": loc["polo"],
                          "area": loc["area"]}
-        canal = "form" if lead_do_formulario(lead) else "direto"
+        canal = "form" if veio_do_formulario(lead) else "direto"
         daily[(dia(lead.get("criado_em")), ddd)][canal] += 1
 
     ufs = sorted({v["uf"] for v in ddds.values()})
@@ -592,6 +613,241 @@ def aggregate_atendimento(events, talks):
         "respostas": sorted(respostas, key=lambda r: r["dia"]),
         "automaticas_pct": rnd(automaticas / len(respostas) * 100, 1)
         if respostas else 0,
+    }
+
+
+# ----------------------------------------------------------------------
+# Atendimento dos leads — quem está sem resposta, há quanto tempo e o que a
+# velocidade de resposta muda. Foto na hora do ETL; o front filtra por
+# período (dia de criação do lead) e agrega.
+# ----------------------------------------------------------------------
+
+ROBO_BOAS_VINDAS_S = 60        # saída até 60 s da criação = boas-vindas do robô
+AGENTE_RESPOSTA_S = 60         # na janela do agente: resposta até 60 s ao lead = IA
+AGENTE_CADEIA_S = 15           # ... ou até 15 s depois de outra mensagem da IA
+BLOCO_TENTATIVA_S = 30 * 60    # mensagens da equipe a menos de 30 min = 1 tentativa
+JANELA_WHATSAPP_S = 24 * 3600  # 24 h depois da última msg do lead, só template
+
+# Valores do formulário nativo → rótulo. Valor novo cai no rótulo genérico.
+TIPO_NEGOCIO_ROTULOS = {
+    "mercado_ou_varejo_alimentar": "Mercado ou varejo alimentar",
+    "distribuidor_ou_revenda": "Distribuidor ou revenda",
+    "restaurante": "Restaurante",
+    "sou_consumidor_final": "Consumidor final",
+    "indústria_de_alimentos": "Indústria de alimentos",
+    "padaria_ou_confeitaria": "Padaria ou confeitaria",
+    "cafeteria_ou_food_service": "Cafeteria ou food service",
+    "hotel_ou_pousada": "Hotel ou pousada",
+}
+# Quem não é comprador do atacado (consumidor final vai para o site).
+TIPOS_FORA_DO_PUBLICO = {"Consumidor final", "Lead de teste (Meta)"}
+
+ATENDIMENTO_COLUNAS = [
+    "dia", "situacao", "canal", "etapa", "tipo", "responsavel",
+    "h_1o_contato_humano", "h_1a_resposta_humana", "continuou", "escreveu",
+    "tentativas", "h_na_situacao", "janela_aberta", "hora_chegada",
+    "dia_semana_chegada",
+]
+
+
+def veio_do_formulario(lead):
+    """Tag do formulário no Kommo ou casamento com a planilha."""
+    return lead_do_formulario(lead) or bool(lead.get("form"))
+
+
+def rotulo_tipo_negocio(valor):
+    v = (valor or "").strip()
+    if not v:
+        return "Não informado"
+    if v.lower().startswith("<test lead"):
+        return "Lead de teste (Meta)"
+    if v in TIPO_NEGOCIO_ROTULOS:
+        return TIPO_NEGOCIO_ROTULOS[v]
+    t = v.replace("_", " ")
+    return t[:1].upper() + t[1:]
+
+
+def _janelas_agente():
+    janelas = []
+    for trecho in (config.AGENTE_IA_JANELAS or "").split(","):
+        ini, _, fim = trecho.strip().partition("/")
+        if not ini:
+            continue
+        try:
+            a = datetime.fromisoformat(ini.strip()).replace(tzinfo=BRT).timestamp()
+            b = (datetime.fromisoformat(fim.strip()).replace(tzinfo=BRT).timestamp()
+                 if fim.strip() else float("inf"))
+        except ValueError:
+            print(f"::warning::AGENTE_IA_JANELAS com trecho inválido: {trecho!r} — ignorado.")
+            continue
+        janelas.append((a, b))
+    return janelas
+
+
+def _horario_atendimento():
+    try:
+        ini, fim = (int(x) for x in config.HORARIO_ATENDIMENTO.split("-"))
+        return [ini, fim]
+    except ValueError:
+        print("::warning::HORARIO_ATENDIMENTO inválido — usando 06-18.")
+        return [6, 18]
+
+
+def classificar_conversa(criado, mensagens, janelas_agente=()):
+    """Separa as mensagens de um lead em entradas (do lead) e da equipe.
+
+    mensagens = [(timestamp, veio_do_lead)]. O Kommo não grava o autor das
+    mensagens do WhatsApp, então vale o tempo: saída até 60 s depois da
+    criação é a boas-vindas do robô; dentro de uma janela do agente de IA,
+    resposta até 60 s ao lead (ou até 15 s depois de outra do agente) é da
+    IA. O resto é da equipe.
+    """
+    entradas, equipe = [], []
+    ult_in = ult_ia = None
+    for t, do_lead in sorted(mensagens):
+        if do_lead:
+            entradas.append(t)
+            ult_in = t
+        elif t - criado <= ROBO_BOAS_VINDAS_S:
+            continue
+        elif any(a <= t <= b for a, b in janelas_agente) and (
+                (ult_in is not None and t - ult_in <= AGENTE_RESPOSTA_S)
+                or (ult_ia is not None and t - ult_ia <= AGENTE_CADEIA_S)):
+            ult_ia = t
+        else:
+            equipe.append(t)
+    return entradas, equipe
+
+
+def aggregate_atendimento_leads(leads, events, contatos, expor_pessoais=False,
+                                agora=None):
+    """Uma linha por lead, sem dado pessoal, com a situação da conversa:
+
+    E = o lead escreveu por último e espera a equipe · P = a equipe falou por
+    último e o lead parou · R = só o robô falou (lead nunca escreveu e a
+    equipe nunca procurou) · N = nenhuma mensagem no Kommo · F = fechado
+    (ganho/perdido). Mais os tempos: 1º contato humano desde a entrada, 1ª
+    resposta humana desde a 1ª mensagem do lead, se a conversa continuou,
+    tentativas depois do silêncio do lead e a janela de 24 h do WhatsApp.
+    """
+    agora = agora or datetime.now(BRT).timestamp()
+    # Os eventos cobrem só os últimos KOMMO_EVENT_DAYS: lead mais antigo que
+    # isso não tem a conversa inteira e ficaria com situação errada.
+    inicio = agora - (config.KOMMO_EVENT_DAYS - 1) * 86400
+    msgs = defaultdict(list)
+    for e in events:
+        if e.get("type") not in ("incoming_chat_message", "outgoing_chat_message"):
+            continue
+        if e.get("entity_type") not in (None, "lead") or not e.get("created_at"):
+            continue
+        msgs[e.get("entity_id")].append(
+            (e["created_at"], e["type"] == "incoming_chat_message"))
+    janelas = _janelas_agente()
+
+    etapas, tipos, resps = [], [], []
+
+    def indice(lista, valor):
+        if valor not in lista:
+            lista.append(valor)
+        return lista.index(valor)
+
+    def horas(segundos):
+        return round(segundos / 3600, 2)
+
+    linhas, esperando, fora_da_janela = [], [], 0
+    for lead in leads:
+        if not lead.get("criado_em"):
+            continue
+        criado = datetime.fromisoformat(lead["criado_em"]).timestamp()
+        if criado < inicio:
+            fora_da_janela += 1
+            continue
+        ms = msgs.get(lead["id"], [])
+        entradas, equipe = classificar_conversa(criado, ms, janelas)
+        ult_eq = equipe[-1] if equipe else None
+        pendentes = [t for t in entradas if ult_eq is None or t > ult_eq]
+        if lead.get("ganho") or lead.get("perdido"):
+            sit, desde = "F", None
+        elif pendentes:
+            sit, desde = "E", pendentes[0]
+        elif equipe:
+            sit, desde = "P", ult_eq
+        elif ms:
+            sit, desde = "R", criado
+        else:
+            sit, desde = "N", criado
+
+        resposta = next((t for t in equipe if t > entradas[0]), None) \
+            if entradas else None
+        continuou = resposta is not None and any(t > resposta for t in entradas)
+        depois = [t for t in equipe if not entradas or t > entradas[-1]]
+        tentativas = sum(1 for i, t in enumerate(depois)
+                         if i == 0 or t - depois[i - 1] > BLOCO_TENTATIVA_S)
+        chegada = datetime.fromtimestamp(entradas[0] if entradas else criado, BRT)
+        contato = contatos.get(str(lead.get("contato_id") or "")) \
+            or contatos.get(lead.get("contato_id")) or {}
+        tipo = rotulo_tipo_negocio(contato.get("tipo_negocio")
+                                   or (lead.get("form") or {}).get("tipo_negocio"))
+        linhas.append([
+            dia(lead["criado_em"]), sit,
+            "f" if veio_do_formulario(lead) else "d",
+            indice(etapas, lead.get("etapa") or "?"),
+            indice(tipos, tipo),
+            indice(resps, lead.get("responsavel") or "Sem responsável"),
+            horas(equipe[0] - criado) if equipe else None,
+            horas(resposta - entradas[0]) if resposta is not None else None,
+            int(continuou), int(bool(entradas)), tentativas,
+            horas(agora - desde) if desde is not None else None,
+            int(bool(entradas) and agora < entradas[-1] + JANELA_WHATSAPP_S),
+            chegada.hour, chegada.weekday(),
+        ])
+        if sit == "E":
+            esperando.append((agora - desde, lead, contato, entradas[-1], tipo,
+                              not equipe))
+
+    # Nome e telefone só com o painel autenticado (mesma regra dos leads parados).
+    if expor_pessoais:
+        base = (f"https://{config.KOMMO_SUBDOMAIN}.kommo.com/leads/detail/"
+                if config.KOMMO_SUBDOMAIN else None)
+        lista = {"disponivel": True, "itens": [{
+            "nome": lead.get("nome") or contato.get("nome") or "(sem nome)",
+            "telefone": contato.get("telefone") or "—",
+            "tipo": tipo,
+            "espera_h": horas(espera),
+            "janela_aberta": agora < ult_in + JANELA_WHATSAPP_S,
+            "nunca_respondido": nunca,
+            "link": f"{base}{lead['id']}" if base else None,
+        } for espera, lead, contato, ult_in, tipo, nunca
+            in sorted(esperando, key=lambda x: (not x[5], -x[0]))[:50]]}
+    else:
+        lista = {"disponivel": False,
+                 "motivo": "Nome e telefone de leads são dados pessoais — a lista "
+                           "nominal só é publicada com o login do painel ativo."}
+
+    cont = defaultdict(int)
+    for linha in linhas:
+        cont[linha[1]] += 1
+    print(f"  Atendimento: {len(linhas)} leads · esperando a equipe {cont['E']}, "
+          f"lead parou {cont['P']}, só robô {cont['R']}, sem conversa {cont['N']}, "
+          f"fechados {cont['F']} · fora da janela de eventos {fora_da_janela}")
+    return {
+        "gerado_em": datetime.fromtimestamp(agora, BRT).isoformat(timespec="minutes"),
+        "desde": datetime.fromtimestamp(inicio, BRT).strftime("%Y-%m-%d"),
+        "fora_da_janela": fora_da_janela,
+        "colunas": ATENDIMENTO_COLUNAS,
+        "linhas": linhas,
+        "etapas": etapas,
+        "tipos": [{"nome": t, "fora_do_publico": t in TIPOS_FORA_DO_PUBLICO}
+                  for t in tipos],
+        "responsaveis": resps,
+        "horario_atendimento": _horario_atendimento(),
+        "regras": {
+            "robo_boas_vindas_s": ROBO_BOAS_VINDAS_S,
+            "bloco_tentativa_min": BLOCO_TENTATIVA_S // 60,
+            "janela_whatsapp_h": JANELA_WHATSAPP_S // 3600,
+            "agente_ia_janelas": config.AGENTE_IA_JANELAS,
+        },
+        "lista_esperando": lista,
     }
 
 
@@ -1031,7 +1287,7 @@ def aggregate_utm(leads):
         "cobertura_efetiva": {
             "total": total, "com_atribuicao": com_atrib,
             "pct": rnd(com_atrib / total * 100, 1) if total else 0,
-            "nota": "UTM ou casamento com a planilha do formulário",
+            "nota": "UTM, planilha do formulário ou tag do formulário no Kommo",
         },
         **dims,
         "campaigns_perf": sorted(
@@ -1244,6 +1500,8 @@ def main():
     crm = aggregate_crm(leads, statuses, events, contatos, expor_pessoais)
     crm_regiao = aggregate_regiao(leads, contatos)
     atendimento = aggregate_atendimento(events, talks)
+    atendimento_leads = aggregate_atendimento_leads(leads, events, contatos,
+                                                    expor_pessoais)
 
     # Duas frentes: B2B Atacado (leads via CRM) e E-commerce (venda direta).
     # Impulsionamento (inst) é da conta inteira e tem seção própria.
@@ -1300,6 +1558,7 @@ def main():
         "crm": crm,
         "crm_regiao": crm_regiao,
         "atendimento": atendimento,
+        "atendimento_leads": atendimento_leads,
         "meta_b2b": meta_b2b,
         "meta_ecom": meta_ecom,
         "google_b2b": google_b2b,
@@ -1322,6 +1581,12 @@ def main():
     if soma_regiao != len(leads):
         print(f"::error::Leads por região ({soma_regiao}) não batem com o "
               f"total de leads ({len(leads)})")
+        sys.exit(1)
+    com_data = sum(1 for lead in leads if lead.get("criado_em"))
+    soma_atend = len(atendimento_leads["linhas"]) + atendimento_leads["fora_da_janela"]
+    if soma_atend != com_data:
+        print(f"::error::Atendimento dos leads ({soma_atend}) não bate com o "
+              f"total de leads com data ({com_data})")
         sys.exit(1)
     if meta_b2b:
         soma_camp = sum(c["leads_crm"] for c in meta_b2b["campaigns"])

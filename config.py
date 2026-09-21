@@ -60,8 +60,19 @@ ROAS_TARGET_ECOM = float(os.getenv("ROAS_TARGET_ECOM", "0") or 0)
 # Estados atendidos no atacado (a Terrana entrega só em SP, MG, PR e RJ).
 # Separa, na origem geográfica dos leads, quem está fora da área.
 AREA_ATENDIDA_UFS = [uf.strip().upper() for uf in
-                     os.getenv("AREA_ATENDIDA_UFS", "SP,MG,PR,RJ").split(",")
+                     (os.getenv("AREA_ATENDIDA_UFS") or "SP,MG,PR,RJ").split(",")
                      if uf.strip()]
+
+# Atendimento dos leads — o Kommo grava toda mensagem do WhatsApp sem autor
+# (created_by=0), então robô × pessoa sai do tempo. Nas janelas em que um
+# agente de IA respondeu sozinho, respostas rápidas dele não contam como da
+# equipe. Formato: "AAAA-MM-DDTHH:MM/AAAA-MM-DDTHH:MM" (Brasília), separadas
+# por vírgula; fim vazio = agente ligado até hoje. 14/09 = teste do agente.
+AGENTE_IA_JANELAS = (os.getenv("AGENTE_IA_JANELAS")
+                     or "2026-09-14T09:30/2026-09-14T11:20")
+# Horário em que a equipe atende em dias úteis (observado nas mensagens de
+# set/2026: 6h–18h). Só separa "chegou no horário × fora dele" no painel.
+HORARIO_ATENDIMENTO = os.getenv("HORARIO_ATENDIMENTO") or "06-18"
 
 # Orçamentos mensais por frente/plataforma (R$/mês). 0 = sem orçamento
 # definido — o card de saldo/projeção mostra estado honesto até definirem.
