@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
+import regioes_br  # noqa: E402
 
 BRT = timezone(timedelta(hours=-3))
 
@@ -311,6 +312,61 @@ def aggregate_leads(leads):
         "by_source": sorted(
             [{"fonte": k, "leads": v} for k, v in by_source.items()],
             key=lambda x: -x["leads"])[:15],
+    }
+
+
+def lead_do_formulario(lead):
+    """O formulário nativo da Meta chega no Kommo com a tag "metaform" e/ou
+    "fb<id do formulário>". Sem essas tags o lead entrou direto (WhatsApp)."""
+    return any(t == "metaform" or re.fullmatch(r"fb\d+", t or "")
+               for t in lead.get("tags") or [])
+
+
+def aggregate_regiao(leads, contatos):
+    """Leads do CRM por DDD do telefone do contato principal.
+
+    O Kommo não tem cidade/estado: o DDD dá o estado com certeza (cada DDD
+    pertence a um único estado) e a cidade-polo da área — aproximação de
+    cidade, rotulada assim no front. Só contagens por dia × DDD × canal:
+    nenhum dado pessoal sai daqui. Lead sem DDD válido entra com ddd "" para
+    a soma continuar batendo com o total de leads (regra 6).
+    """
+    canais = any("tags" in lead for lead in leads)
+    if not canais:
+        print("::warning::Leads do Kommo sem tags (coleta antiga) — região "
+              "sai sem a separação formulário × direto.")
+    daily = defaultdict(lambda: {"form": 0, "direto": 0})
+    tipos = defaultdict(int)
+    ddds = {}
+    for lead in leads:
+        contato = contatos.get(str(lead.get("contato_id") or "")) \
+            or contatos.get(lead.get("contato_id")) or {}
+        loc = regioes_br.localizar(contato.get("telefone"))
+        tipos[loc["tipo"]] += 1
+        ddd = loc.get("ddd") or ""
+        if ddd:
+            ddds[ddd] = {"uf": loc["uf"], "polo": loc["polo"],
+                         "area": loc["area"]}
+        canal = "form" if lead_do_formulario(lead) else "direto"
+        daily[(dia(lead.get("criado_em")), ddd)][canal] += 1
+
+    ufs = sorted({v["uf"] for v in ddds.values()})
+    print(f"  Região (DDD): {tipos['br']}/{len(leads)} leads localizados "
+          f"(sem telefone {tipos['sem_telefone']}, exterior {tipos['exterior']}, "
+          f"inválido {tipos['invalido']}) · {len(ufs)} estados, {len(ddds)} DDDs")
+    return {
+        "metodo": "DDD do telefone do contato principal no Kommo",
+        "canais": canais,
+        "area_atendida": config.AREA_ATENDIDA_UFS,
+        "ddds": dict(sorted(ddds.items())),
+        "ufs": {uf: {"nome": regioes_br.NOME_UF[uf],
+                     "regiao": regioes_br.REGIAO_UF[uf]} for uf in ufs},
+        "daily": [{"dia": d, "ddd": ddd, **v}
+                  for (d, ddd), v in sorted(daily.items())],
+        "cobertura": {"total": len(leads), "com_ddd": tipos["br"],
+                      "sem_telefone": tipos["sem_telefone"],
+                      "exterior": tipos["exterior"],
+                      "invalido": tipos["invalido"]},
     }
 
 
@@ -1186,6 +1242,7 @@ def main():
 
     leads_agg = aggregate_leads(leads)
     crm = aggregate_crm(leads, statuses, events, contatos, expor_pessoais)
+    crm_regiao = aggregate_regiao(leads, contatos)
     atendimento = aggregate_atendimento(events, talks)
 
     # Duas frentes: B2B Atacado (leads via CRM) e E-commerce (venda direta).
@@ -1237,9 +1294,11 @@ def main():
             "orcamento_google_ecom": config.ORCAMENTO_GOOGLE_ECOM,
             "orcamento_google_b2b": config.ORCAMENTO_GOOGLE_B2B,
             "orcamento_meta_inst": config.ORCAMENTO_META_INST,
+            "area_atendida": config.AREA_ATENDIDA_UFS,
         },
         "leads": leads_agg,
         "crm": crm,
+        "crm_regiao": crm_regiao,
         "atendimento": atendimento,
         "meta_b2b": meta_b2b,
         "meta_ecom": meta_ecom,
@@ -1259,6 +1318,11 @@ def main():
         leads_agg, crm, meta_b2b or {"monthly": []}, atendimento, utm)
 
     # Sanidade (regra 6): decomposição nunca maior que o KPI.
+    soma_regiao = sum(r["form"] + r["direto"] for r in crm_regiao["daily"])
+    if soma_regiao != len(leads):
+        print(f"::error::Leads por região ({soma_regiao}) não batem com o "
+              f"total de leads ({len(leads)})")
+        sys.exit(1)
     if meta_b2b:
         soma_camp = sum(c["leads_crm"] for c in meta_b2b["campaigns"])
         if soma_camp > matching_stats["leads_pagos_meta"] + 0.01:

@@ -57,6 +57,12 @@ CPL_TARGET_GOOGLE = float(os.getenv("CPL_TARGET_GOOGLE", "0") or 0)
 CPA_TARGET_ECOM = float(os.getenv("CPA_TARGET_ECOM", "0") or 0)
 ROAS_TARGET_ECOM = float(os.getenv("ROAS_TARGET_ECOM", "0") or 0)
 
+# Estados atendidos no atacado (a Terrana entrega só em SP, MG, PR e RJ).
+# Separa, na origem geográfica dos leads, quem está fora da área.
+AREA_ATENDIDA_UFS = [uf.strip().upper() for uf in
+                     os.getenv("AREA_ATENDIDA_UFS", "SP,MG,PR,RJ").split(",")
+                     if uf.strip()]
+
 # Orçamentos mensais por frente/plataforma (R$/mês). 0 = sem orçamento
 # definido — o card de saldo/projeção mostra estado honesto até definirem.
 ORCAMENTO_META_B2B = float(os.getenv("ORCAMENTO_META_B2B", "0") or 0)

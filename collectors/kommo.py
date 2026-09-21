@@ -220,6 +220,11 @@ def get_leads(client, statuses, users):
             "fechado_em": _iso(lead.get("closed_at")),
             "valor": float(lead.get("price") or 0),
             "responsavel": users.get(lead.get("responsible_user_id"), ""),
+            # Tags: o formulário nativo da Meta marca "metaform" e
+            # "fb<id do formulário>" — separa formulário de entrada direta.
+            "tags": [t.get("name", "") for t in
+                     (lead.get("_embedded") or {}).get("tags") or []
+                     if t.get("name")],
             **_tracking(lead),
         })
     print(f"  Kommo: {len(rows)} leads")

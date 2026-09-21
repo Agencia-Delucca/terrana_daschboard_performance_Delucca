@@ -262,6 +262,7 @@ a:hover { text-decoration: underline; }
 .card-sub { color: var(--text-muted); font-size: 12px; margin-top: 3px; line-height: 1.45; }
 .chart-box { position: relative; height: 260px; }
 .chart-box.tall { height: 300px; }
+.chart-box.xtall { height: 400px; }   /* barras horizontais com 10–12 categorias */
 .chart-box.short { height: 230px; }
 /* small multiples: 2 gráficos empilhados no mesmo eixo X (substituem eixo duplo) */
 .chart-box.multi { height: 150px; }

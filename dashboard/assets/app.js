@@ -343,7 +343,9 @@ function funnelHtml(fp) {
 function chartsReady() { return typeof Chart !== 'undefined'; }
 
 /* Rótulos diretos seletivos, desenhados em creme/soft (texto nunca na cor
-   da série). options.plugins.directLabels = { mode:'all'|'max', format, datasets } */
+   da série). options.plugins.directLabels = { mode:'all'|'max'|'total', format, datasets }
+   'total' = barras empilhadas: UM rótulo por categoria, com a soma das séries
+   visíveis, na ponta da pilha — format(total, índice). */
 const directLabelsPlugin = {
   id: 'directLabels',
   // Sem opções "scriptable": o resolver do Chart.js chamaria format() com o
@@ -357,6 +359,31 @@ const directLabelsPlugin = {
     ctx.save();
     ctx.font = "600 10.5px 'Montserrat','Segoe UI',sans-serif";
     ctx.fillStyle = P.soft;
+    if (o.mode === 'total') {
+      (chart.data.labels || []).forEach((lab, i) => {
+        let tot = 0, ponta = null, meio = null;
+        chart.data.datasets.forEach((ds, di) => {
+          const el = chart.getDatasetMeta(di).data[i];
+          if (!chart.isDatasetVisible(di) || ds.data[i] == null || !el) return;
+          tot += ds.data[i];
+          const p = horizontal ? el.x : el.y;
+          if (ponta == null || (horizontal ? p > ponta : p < ponta)) { ponta = p; meio = horizontal ? el.y : el.x; }
+        });
+        if (ponta == null) return;
+        const txt = o.format ? o.format(tot, i) : fmt.num(tot);
+        if (horizontal) {
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(txt, ponta + 6, meio);
+        } else {
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(txt, meio, ponta - 5);
+        }
+      });
+      ctx.restore();
+      return;
+    }
     chart.data.datasets.forEach((ds, di) => {
       if (o.datasets && o.datasets.indexOf(di) < 0) return;
       const meta = chart.getDatasetMeta(di);
@@ -1421,6 +1448,7 @@ function renderOtimizacao(el, front) {
   html += front === 'b2b' ? otLegadoB2B() : otLegadoEcom();
   el.innerHTML = html;
   otCharts(c, dd);
+  if (front === 'b2b') regiaoCharts();
 }
 
 /* ============================================================
@@ -1493,7 +1521,161 @@ function otLegadoB2B() {
       ], qualRows)
       : emptyDashed('Sem dados por responsável.'));
 
+  html += regiaoHtml();
   return html;
+}
+
+/* ---------- De onde vêm os leads (DDD do telefone no CRM) ----------
+   crm_regiao.daily = [{dia, ddd, form, direto}] · ddd "" = sem DDD válido.
+   O estado é exato (cada DDD pertence a um só estado); a "cidade" é a
+   cidade-polo da área do DDD — o Kommo não tem campo de cidade.
+   form = tag do formulário do anúncio no Kommo · direto = entrou sem ela. */
+const REGIAO_TOP_UF = 10;
+const REGIAO_TOP_DDD = 12;
+function regiaoResumo() {
+  const R = DATA.crm_regiao;
+  if (!R || !Array.isArray(R.daily)) return null;
+  const ddds = dict(R.ddds), ufs = dict(R.ufs);
+  const area = R.area_atendida || [];
+  const porUf = Object.create(null), porDdd = Object.create(null);
+  let total = 0, semDdd = 0, dentro = 0, foraDireto = 0;
+  fdays(R.daily).forEach(r => {
+    const f = r.form || 0, dr = r.direto || 0, n = f + dr;
+    total += n;
+    const info = r.ddd ? ddds[r.ddd] : null;
+    if (!info) { semDdd += n; return; }
+    const u = porUf[info.uf] || (porUf[info.uf] = { form: 0, direto: 0 });
+    u.form += f; u.direto += dr;
+    const d = porDdd[r.ddd] || (porDdd[r.ddd] = { form: 0, direto: 0 });
+    d.form += f; d.direto += dr;
+    if (area.indexOf(info.uf) >= 0) dentro += n; else foraDireto += dr;
+  });
+  const nomeUf = k => (ufs[k] || {}).nome || k;
+  const ordena = (m, nome) => Object.keys(m)
+    .map(k => ({ k, form: m[k].form, direto: m[k].direto, n: m[k].form + m[k].direto }))
+    .sort((a, b) => (b.n - a.n) || nome(a.k).localeCompare(nome(b.k), 'pt-BR'));
+  return {
+    area, ddds, ufs, nomeUf, total, semDdd, dentro, foraDireto,
+    fora: total - semDdd - dentro,
+    canais: R.canais !== false,
+    naArea: uf => area.indexOf(uf) >= 0,
+    ufRows: ordena(porUf, nomeUf),
+    dddRows: ordena(porDdd, k => k)
+  };
+}
+function listaPt(arr) {
+  return arr.length > 1 ? arr.slice(0, -1).join(', ') + ' e ' + arr[arr.length - 1] : arr.join('');
+}
+function regiaoHtml() {
+  let html = secTitle('De onde vêm os leads', 'estado e área de DDD do telefone · leads criados no período');
+  const g = regiaoResumo();
+  if (!g) return html + card('', '', emptyDashed('A origem geográfica dos leads ainda não está nesta versão dos dados.', 'Aparece na próxima atualização do painel.'));
+  if (!g.total) return html + card('', '', emptyDashed('Nenhum lead criado no período selecionado.', 'Ajuste o filtro de período no topo.'));
+  const comDdd = g.total - g.semDdd;
+  if (!comDdd) return html + card('', '', emptyDashed('Nenhum lead do período tem telefone com DDD brasileiro válido.', 'Sem telefone, número do exterior ou número inválido no Kommo.'));
+  const areaTxt = esc(listaPt(g.area));
+  html += '<div class="kpis cols-4">' +
+    kpi('Leads no período', fmt.num(g.total), g.semDdd ? fmt.num(comDdd) + ' com DDD válido' : 'todos com DDD válido') +
+    kpi('Na área atendida', comDdd ? fmt.pct(g.dentro / comDdd * 100) : null, fmt.num(g.dentro) + ' em ' + areaTxt) +
+    kpi('Fora da área', fmt.num(g.fora), g.canais && g.fora ? fmt.num(g.foraDireto) + ' entraram direto, sem formulário' : 'outros estados') +
+    kpi('Estados de origem', fmt.num(g.ufRows.length), fmt.num(g.dddRows.length) + ' DDDs diferentes') +
+    '</div>';
+
+  const canalHead = g.canais ? [{ t: 'Formulário', r: 1 }, { t: 'Direto', r: 1 }] : [];
+  const canalCells = r => g.canais ? '<td class="r">' + fmt.num(r.form) + '</td><td class="r">' + fmt.num(r.direto) + '</td>' : '';
+  const ufRel = g.ufRows.map(r =>
+    '<tr><td class="name">' + esc(g.nomeUf(r.k)) + ' (' + esc(r.k) + ')</td>' +
+    '<td class="peri">' + esc((g.ufs[r.k] || {}).regiao || '—') + '</td>' +
+    '<td class="r">' + fmt.num(r.n) + '</td><td class="r">' + fmt.pct(r.n / g.total * 100) + '</td>' + canalCells(r) +
+    '<td>' + (g.naArea(r.k) ? 'sim' : '<span class="muted">não</span>') + '</td></tr>').join('');
+  const dddRel = g.dddRows.map(r => {
+    const i = g.ddds[r.k] || {};
+    return '<tr><td class="name">' + esc(r.k) + '</td><td>' + esc(i.area || '—') + '</td>' +
+      '<td class="peri">' + esc(i.uf || '—') + '</td>' +
+      '<td class="r">' + fmt.num(r.n) + '</td><td class="r">' + fmt.pct(r.n / g.total * 100) + '</td>' + canalCells(r) + '</tr>';
+  }).join('');
+  const canalNota = g.canais
+    ? ' <strong>Formulário</strong> = lead com a tag do formulário do anúncio no Kommo · <strong>direto</strong> = entrou sem formulário (WhatsApp).'
+    : ' Separação formulário × direto indisponível nesta versão dos dados.';
+  const semDddNota = g.semDdd ? ' ' + fmt.num(g.semDdd) + ' lead(s) sem DDD válido (sem telefone, número do exterior ou inválido) ficam fora dos gráficos.' : '';
+
+  html += '<div class="grid-2">' +
+    chartCard('Leads por estado', 'top ' + REGIAO_TOP_UF + ' · rótulo = leads · % do período', 'ch-reg-uf', 'xtall',
+      '<div class="note">Estados com nome em cinza ficam fora da área atendida no atacado (' + areaTxt + ').' + canalNota + semDddNota + '</div>' +
+      reliefTable([{ t: 'Estado' }, { t: 'Região' }, { t: 'Leads', r: 1 }, { t: '% do período', r: 1 }].concat(canalHead).concat([{ t: 'Área atendida' }]), ufRel)) +
+    chartCard('Leads por área de DDD', 'top ' + REGIAO_TOP_DDD + ' · cidade-polo do DDD', 'ch-reg-ddd', 'xtall',
+      '<div class="note">O Kommo não tem campo de cidade: o DDD mostra a <strong>área</strong> (ex.: 19 = Campinas, Piracicaba, Limeira e região), não a cidade exata do lead. A área completa aparece ao passar o mouse e na tabela.</div>' +
+      reliefTable([{ t: 'DDD' }, { t: 'Área do DDD' }, { t: 'UF' }, { t: 'Leads', r: 1 }, { t: '% do período', r: 1 }].concat(canalHead), dddRel)) +
+    '</div>';
+  return html;
+}
+function regiaoCharts() {
+  const g = regiaoResumo();
+  if (!g || !g.total || !g.ufRows.length) return;
+  const ufItens = g.ufRows.slice(0, REGIAO_TOP_UF).map(r => ({
+    lab: g.nomeUf(r.k), titulo: g.nomeUf(r.k) + ' (' + r.k + ')', ufs: [r.k], form: r.form, direto: r.direto
+  }));
+  const resto = g.ufRows.slice(REGIAO_TOP_UF);
+  if (resto.length) {
+    ufItens.push({
+      lab: 'Outros ' + resto.length + ' estados',
+      titulo: resto.map(r => r.k + ' ' + fmt.num(r.n)).join(' · '),
+      ufs: resto.map(r => r.k),
+      form: resto.reduce((a, r) => a + r.form, 0),
+      direto: resto.reduce((a, r) => a + r.direto, 0)
+    });
+  }
+  const dddItens = g.dddRows.slice(0, REGIAO_TOP_DDD).map(r => {
+    const i = g.ddds[r.k] || {};
+    return { lab: r.k + ' · ' + (i.polo || '?'), titulo: 'DDD ' + r.k + ' · ' + (i.area || '?') + ' (' + (i.uf || '?') + ')', ufs: [i.uf], form: r.form, direto: r.direto };
+  });
+  regiaoBarras('ch-reg-uf', ufItens, g, true);
+  regiaoBarras('ch-reg-ddd', dddItens, g, false);
+}
+/* Barras horizontais empilhadas por canal (mostarda = formulário, terracota =
+   direto — mesma cor nos dois gráficos) · total rotulado na ponta · eixo com o
+   nome em cinza quando a categoria fica fora da área atendida. */
+function regiaoBarras(id, itens, g, comPct) {
+  // raio numérico em pilha: o Chart.js só arredonda a ponta externa da pilha
+  const seg = { stack: 'reg', borderColor: P.bgCard, borderWidth: 2, borderRadius: 3, borderSkipped: 'left', maxBarThickness: 24 };
+  const datasets = g.canais
+    ? [barDs('Formulário do anúncio', itens.map(i => i.form), S.mostarda, seg),
+      barDs('Direto (WhatsApp)', itens.map(i => i.direto), S.terracota, seg)]
+    : [barDs('Leads', itens.map(i => i.form + i.direto), S.terracota, seg)];
+  const tot = i => itens[i].form + itens[i].direto;
+  const dentro = it => it.ufs.every(u => g.naArea(u));
+  makeChart(id, {
+    type: 'bar',
+    data: { labels: itens.map(i => i.lab), datasets },
+    options: baseOpts({
+      indexAxis: 'y',
+      interaction: { mode: 'index', axis: 'y', intersect: false },
+      // folga fixa à direita para o rótulo da ponta (a % de grace sozinha
+      // não basta quando o card fica estreito)
+      layout: { padding: { right: comPct ? 46 : 22 } },
+      plugins: {
+        legend: g.canais ? legendTop() : { display: false },
+        directLabels: {
+          mode: 'total',
+          format: (v, i) => fmt.num(v) + (comPct ? ' · ' + fmt.pct(v / g.total * 100, 0) : '')
+        },
+        tooltip: {
+          callbacks: {
+            title: items => itens[items[0].dataIndex].titulo,
+            footer: items => {
+              const i = items[0].dataIndex;
+              return ['Total: ' + fmt.num(tot(i)) + ' leads · ' + fmt.pct(tot(i) / g.total * 100) + ' do período']
+                .concat(dentro(itens[i]) ? [] : ['fora da área atendida']);
+            }
+          }
+        }
+      },
+      scales: {
+        x: yCount({ position: 'bottom', stacked: true, grace: '8%', ticks: { maxRotation: 0, minRotation: 0, precision: 0 } }),
+        y: { stacked: true, grid: { display: false }, ticks: { autoSkip: false, color: c => dentro(itens[c.index] || { ufs: [] }) ? P.soft : P.muted } }
+      }
+    })
+  });
 }
 
 /* ============================================================

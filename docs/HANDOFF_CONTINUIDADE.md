@@ -119,8 +119,12 @@ O `gh` CLI **não está instalado** nesta máquina; use a interface web do GitHu
 
 ```bash
 set PYTHONUTF8=1
-python -m unittest discover -s tests -t .        # 16 testes do coletor da Meta, sem tocar na API
+python -m unittest discover -s tests -t .        # 24 testes: 16 do coletor da Meta + 8 da origem por DDD, sem rede
 ```
+
+`tests/test_regioes.py` (8 testes) cobre a tabela de DDDs, os formatos de telefone
+(com/sem 55, 0 de longa distância, exterior, inválido) e a agregação `crm_regiao`
+(soma = total de leads, formulário pela tag, nenhum dado pessoal no resultado).
 
 Os 16 testes (`tests/test_meta_coleta.py`, 348 linhas) usam sessão HTTP e relógio
 falsos e cobrem exatamente as travas da grade: fora da janela não chama, coleta
@@ -270,6 +274,8 @@ quando a publicação for autenticada.
 | `docs/SPEC_VISUAL_REFERENCIA.md` (215 l.) | Spec do blueprint visual da agência (origem: dashboard Dr. Move). Vale para estrutura e anatomia; **as cores estão obsoletas** (§9.4) |
 | `docs/HANDOFF_CONTINUIDADE.md` | Este documento |
 | `tests/test_meta_coleta.py` (348 l.) | 16 testes do coletor da Meta, sem tocar na API |
+| `regioes_br.py` | Tabela dos 67 DDDs → UF, cidade-polo e área; nome e região de cada UF; `localizar(telefone)` |
+| `tests/test_regioes.py` | 8 testes da origem geográfica (DDD → estado) e da agregação `crm_regiao` |
 | `.github/workflows/deploy_pages.yml` (169 l.) | **Único** workflow: coleta + ETL + deploy |
 | `requirements.txt` | `requests`, `python-dotenv`, `supabase`, `google-auth` |
 | `.env.example` | Nomes das variáveis (sem valores). **Defasado**: faltam `GOOGLE_SA_JSON` e os cinco `ORCAMENTO_*` que existem no `.env` real |
@@ -534,7 +540,7 @@ etapa desconhecida → 900, vai para o fim).
 | `last_update` | str | 1220 | `dd/mm/aaaa HH:MM` BRT — data de geração do **ETL**, não da coleta |
 | `cliente` | str | 1221 | `"Terrana B2B"` (hardcoded) |
 | `totals` | dict | 1222 | `leads, meta_rows, google_rows, eventos, conversas_abertas` |
-| `config` | dict(10) | 1229 | Espelho do `config.py`: `ticket_medio`, 4 targets, 5 orçamentos. `0` = não definido |
+| `config` | dict(11) | 1229 | Espelho do `config.py`: `ticket_medio`, 4 targets, 5 orçamentos (`0` = não definido) e `area_atendida` (UFs) |
 | `leads` | dict(7) | `aggregate_leads` (276) | `total, pagos, organicos, sem_utm, monthly[], daily[], by_source[15]` |
 | `crm` | dict(17) | `aggregate_crm` (317) | `funnel, active_funnel, tempo_etapa, leads_parados, deals_minimal, losses, losses_daily, by_responsavel, monthly_won, ciclo, total_*, taxa_fechamento*` |
 | `atendimento` | dict(9) | `aggregate_atendimento` (476) | `conversas_total, em_aberto, nao_lidas, recebidas, enviadas, msgs_daily, msgs_hora[24], respostas[] (cruas), automaticas_pct` |
@@ -547,6 +553,7 @@ etapa desconhecida → 900, vai para o fim).
 | `institucional` | dict(3) ou `null` | `aggregate_institucional` (748) | `split_gasto` (todas as frentes), `monthly`, `campaigns` (com thumbnail/permalink do anúncio de maior gasto) |
 | `publico` | dict(4) | `aggregate_publico` (799) | `disponivel, age_gender, placement, region` — cada linha com `frente` |
 | `qualidade_responsavel` | **list** | (818) | Única chave de topo que é lista |
+| `crm_regiao` | dict(7) | `aggregate_regiao` | Origem geográfica dos leads pelo **DDD do telefone** do contato (o Kommo não tem cidade/estado): `metodo, canais, area_atendida, ddds{ddd:{uf,polo,area}}, ufs{uf:{nome,regiao}}, daily[{dia,ddd,form,direto}], cobertura`. `ddd ""` = sem DDD válido (a soma bate com o total de leads — gate no `main()`). `form` = tag `metaform`/`fb<id>` no Kommo; `canais=false` se a coleta não trouxe tags. Tabela DDD → UF em `regioes_br.py`; área atendida em `AREA_ATENDIDA_UFS` (padrão SP,MG,PR,RJ). Só contagens — sem PII |
 | `relatorio` | dict(9) | `build_relatorio` (1076) | `mes, leads_mes, leads_mes_anterior, delta_leads_pct, gasto_meta_mes, conversas_meta_mes, cpl_plat_mes, rastreamento_pct, alertas[]` |
 
 **Dentro de `meta_b2b` / `meta_ecom`** (é o que toda página de Meta Ads lê — não
@@ -620,7 +627,7 @@ são **relativos** — caminho absoluto com `/` quebra o Pages, que roda em subc
 
 | Página | Função | Linha | O que mostra | Lê do summary |
 |---|---|---|---|---|
-| Visão Geral | `renderVisaoB2B` → `renderOtimizacao(el,'b2b')` | 1430 / 1404 | Dashboard de Otimização: ciclo de orçamento, período, campanhas, "o que fazer agora", evolução, histórico, resultado, ações | `otimizacao_b2b`, `meta_b2b`, `google_b2b`, `config`, `relatorio` |
+| Visão Geral | `renderVisaoB2B` → `renderOtimizacao(el,'b2b')` | 1430 / 1404 | Dashboard de Otimização: ciclo de orçamento, período, campanhas, "o que fazer agora", evolução, histórico, resultado, ações. No fim, seção **"De onde vêm os leads"** (21/09, pedido da Isabela): KPIs de área atendida + barras empilhadas formulário × direto por estado (top 10 + "Outros") e por área de DDD (top 12), com o filtro de período — `regiaoHtml`/`regiaoCharts`/`regiaoBarras` | `otimizacao_b2b`, `meta_b2b`, `google_b2b`, `config`, `relatorio`, `crm_regiao` |
 | Funil CRM | `renderFunilCRM` | 1502 | Funil por etapa, ativos, perdas e motivos, responsáveis, ciclo, tempo parado, leads parados (PII quando liberado) | `crm` |
 | Atendimento | `renderAtendimento` | 1688 | Mensagens recebidas/enviadas, conversas, 1ª resposta (mediana/p90/faixas), % automática, mensagens por hora | `atendimento` |
 | Meta Ads | `renderMetaB2B` | 1798 | Mensal e diário (gasto × leads), campanhas, conjuntos, criativos com thumbnail | `meta_b2b` |
